@@ -1,1 +1,479 @@
-# autonomus_datapipeline
+<p align="center">
+  <h1 align="center">🚀 Autonomous Data Pipeline</h1>
+  <p align="center">
+    <strong>AI-Powered, Configuration-Driven Data Pipeline with Medallion Architecture</strong>
+  </p>
+  <p align="center">
+    <em>Upload → Detect Schema → Bronze → Silver → Gold → PostgreSQL — all from a visual UI.</em>
+  </p>
+  <p align="center">
+    <img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI"/>
+    <img src="https://img.shields.io/badge/React-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React"/>
+    <img src="https://img.shields.io/badge/Apache_Spark-E25A1C?style=for-the-badge&logo=apachespark&logoColor=white" alt="Spark"/>
+    <img src="https://img.shields.io/badge/Apache_Airflow-017CEE?style=for-the-badge&logo=apacheairflow&logoColor=white" alt="Airflow"/>
+    <img src="https://img.shields.io/badge/MinIO-C72E49?style=for-the-badge&logo=minio&logoColor=white" alt="MinIO"/>
+    <img src="https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL"/>
+    <img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker"/>
+    <img src="https://img.shields.io/badge/Gemini_AI-8E75B2?style=for-the-badge&logo=googlegemini&logoColor=white" alt="Gemini AI"/>
+  </p>
+</p>
+
+---
+
+## 📋 Table of Contents
+
+- [Overview](#overview)
+- [Architecture Diagram](#architecture-diagram)
+- [Tech Stack](#tech-stack)
+- [Features](#features)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+- [Service Ports](#service-ports)
+- [Usage Workflow](#usage-workflow)
+- [API Endpoints](#api-endpoints)
+- [Environment Variables](#environment-variables)
+
+---
+
+## Overview
+
+**Autonomous Data Pipeline** is a full-stack, AI-assisted data engineering platform that automates the entire data pipeline lifecycle — from raw data ingestion to enriched, query-ready tables — using the **Medallion Architecture** (Bronze → Silver → Gold).
+
+Users interact through a **React-based dark-themed UI** to upload data files, auto-detect schemas, configure AI-powered transformations via natural language chat (powered by **Google Gemini**), and orchestrate everything through auto-generated **Airflow DAGs**.
+
+---
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              AUTONOMOUS DATA PIPELINE                               │
+│                           Medallion Architecture (B → S → G)                        │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│   ┌──────────────┐         ┌─────────────────────────────────────────────────────┐  │
+│   │              │  REST   │              BACKEND (FastAPI)                      │  │
+│   │   FRONTEND   │ ◄─────►│                                                     │  │
+│   │   (React +   │  API   │  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  │  │
+│   │   MUI + TS)  │        │  │ Routers  │  │  Services    │  │  Models      │  │  │
+│   │              │        │  │          │  │              │  │  (SQLAlchemy) │  │  │
+│   │  • Projects  │        │  │ /upload  │  │ schema_det.  │  │              │  │  │
+│   │  • Schema    │        │  │ /schemas │  │ ai_service   │  │ pipelines    │  │  │
+│   │    Preview   │        │  │ /bronze  │  │ dag_gen.     │  │ schemas      │  │  │
+│   │  • Silver    │        │  │ /silver  │  │ minio_svc.   │  │ bronze_ing.  │  │  │
+│   │    Enrichment│        │  │ /gold    │  │ code_saver   │  │ transforms   │  │  │
+│   │  • Gold      │        │  │ /dags    │  │              │  │ audit_log    │  │  │
+│   │    Enrichment│        │  │ /pipes   │  └──────┬───────┘  └──────────────┘  │  │
+│   │  • DAG Mgmt  │        │  └──────────┘         │                             │  │
+│   └──────────────┘        └───────────────────────┼─────────────────────────────┘  │
+│        :3001                      :8000            │                                 │
+│                                                    │                                 │
+│  ┌─────────────────────────────────────────────────┼─────────────────────────────┐  │
+│  │                     DATA & ORCHESTRATION LAYER  │                             │  │
+│  │                                                 │                             │  │
+│  │  ┌──────────────┐    ┌──────────────────┐       │    ┌────────────────────┐   │  │
+│  │  │              │    │                  │       │    │                    │   │  │
+│  │  │  PostgreSQL  │    │    MinIO (S3)    │       │    │   Apache Spark    │   │  │
+│  │  │              │    │                  │  ┌────▼──┐ │                    │   │  │
+│  │  │  • Metadata  │    │  ┌────────────┐  │  │Gemini │ │  • Master + 1     │   │  │
+│  │  │  • Schemas   │    │  │  🥉 Bronze │  │  │  AI   │ │    Worker         │   │  │
+│  │  │  • Audit Log │    │  │   (raw)    │  │  │  API  │ │  • PySpark 3.5.1  │   │  │
+│  │  │  • Gold Push │    │  ├────────────┤  │  └───────┘ │  • S3A / MinIO    │   │  │
+│  │  │    Tables    │    │  │  🥈 Silver │  │            │    connectors     │   │  │
+│  │  │              │    │  │  (cleaned) │  │            │                    │   │  │
+│  │  │              │    │  ├────────────┤  │            │                    │   │  │
+│  │  │              │    │  │  🥇 Gold   │  │            │                    │   │  │
+│  │  │              │    │  │ (enriched) │  │            │                    │   │  │
+│  │  │              │    │  └────────────┘  │            │                    │   │  │
+│  │  └──────────────┘    └──────────────────┘            └────────────────────┘   │  │
+│  │      :5433              :9010 / :9011                   :7078 / :8090         │  │
+│  │                                                                               │  │
+│  │  ┌──────────────┐    ┌──────────────────────────────────────────────────────┐  │  │
+│  │  │              │    │               Apache Airflow                        │  │  │
+│  │  │    Redis     │    │                                                     │  │  │
+│  │  │   (Cache)    │    │  ┌─────────┐   ┌─────────┐   ┌─────────┐          │  │  │
+│  │  │              │    │  │ Bronze  │──►│ Silver  │──►│  Gold   │          │  │  │
+│  │  │              │    │  │  DAG    │   │  DAG    │   │  DAG    │          │  │  │
+│  │  │              │    │  └─────────┘   └─────────┘   └─────────┘          │  │  │
+│  │  │              │    │       └──────────────┴──────────────┘               │  │  │
+│  │  │              │    │                Master DAG (TriggerDagRun)           │  │  │
+│  │  └──────────────┘    └──────────────────────────────────────────────────────┘  │  │
+│  │      :6380                          :8085                                     │  │
+│  └───────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                     │
+│                        All services on Docker Network: pipeline-net                  │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow
+
+```
+  📁 Upload Files (CSV/JSON/Parquet)
+        │
+        ▼
+  🔍 Auto Schema Detection (pandas + heuristic inference)
+        │
+        ▼
+  ✅ Confirm Schema → Trigger Bronze Ingestion
+        │
+        ▼
+  🥉 BRONZE LAYER (MinIO: s3a://bronze/<project>/v<N>/...)
+  │     Raw data stored as Parquet, partitioned by ingestion date
+        │
+        ▼
+  🤖 AI Chat (Gemini) → Generate PySpark transform() code
+  │     Dry-run → Confirm → Version control
+        │
+        ▼
+  🥈 SILVER LAYER (MinIO: s3a://silver/<project>/...)
+  │     Cleaned, validated, transformed data
+        │
+        ▼
+  🤖 AI Chat (Gemini) → Generate Gold enrichment code
+  │     Joins, aggregations, API enrichment
+        │
+        ▼
+  🥇 GOLD LAYER (MinIO: s3a://gold/<project>/...)
+  │     Business-ready, enriched datasets
+        │
+        ▼
+  🐘 Push to PostgreSQL (append / replace / fail modes)
+        │
+        ▼
+  ⚙️  Auto-generate Airflow DAGs (Bronze → Silver → Gold → Master)
+```
+
+---
+
+## Tech Stack
+
+### Backend
+| Technology | Version | Purpose |
+|---|---|---|
+| **Python** | 3.11 | Core language |
+| **FastAPI** | 0.109.0 | REST API framework |
+| **SQLAlchemy** | Latest | ORM for PostgreSQL |
+| **Pydantic** | v2 | Settings & request/response validation |
+| **Uvicorn** | 0.27.0 | ASGI server |
+
+### Frontend
+| Technology | Version | Purpose |
+|---|---|---|
+| **React** | 18.2 | UI framework |
+| **TypeScript** | 4.9 | Type-safe JavaScript |
+| **Material UI (MUI)** | 5.15 | Component library (dark theme) |
+| **React Router** | 6.21 | Client-side routing |
+| **TanStack React Query** | 5.17 | Server state management |
+| **Monaco Editor** | 4.7 | In-browser code editor |
+| **Axios** | 1.6 | HTTP client |
+
+### Data Processing
+| Technology | Version | Purpose |
+|---|---|---|
+| **Apache Spark** | 3.5.1 | Distributed data processing |
+| **PySpark** | 3.5.1 | Python API for Spark |
+| **Pandas** | 2.2.0 | Schema detection & small data |
+| **PyArrow** | Latest | Parquet read/write |
+
+### Orchestration
+| Technology | Version | Purpose |
+|---|---|---|
+| **Apache Airflow** | 2.9.0 | Workflow orchestration |
+| **LocalExecutor** | — | Single-node task execution |
+
+### Storage
+| Technology | Version | Purpose |
+|---|---|---|
+| **PostgreSQL** | 15 (Alpine) | Metadata store, Gold layer export |
+| **MinIO** | Latest | S3-compatible object storage (Bronze/Silver/Gold) |
+| **Redis** | 7 (Alpine) | Caching layer |
+
+### AI / LLM
+| Technology | Model | Purpose |
+|---|---|---|
+| **Google Gemini API** | gemini-2.5-flash | AI-powered PySpark code generation for Silver & Gold transformations |
+
+### Infrastructure
+| Technology | Purpose |
+|---|---|
+| **Docker & Docker Compose** | Containerized deployment |
+| **Hadoop AWS (3.3.4)** | S3A filesystem connector for Spark |
+| **PostgreSQL JDBC** | Spark ↔ PostgreSQL connector |
+
+---
+
+## Features
+
+- ✅ **Auto Schema Detection** — Upload CSV/JSON/Parquet files and auto-detect column types, nullability, and sample values with confidence scoring
+- ✅ **Medallion Architecture** — Bronze (raw) → Silver (cleaned) → Gold (enriched) data layers stored in MinIO
+- ✅ **AI-Powered Transformations** — Chat with Google Gemini to generate PySpark transformation code using natural language
+- ✅ **Conversational AI Workflow** — Iterative code generation with clarifying questions, dry-runs, and version control
+- ✅ **Visual Code Editor** — Edit generated PySpark code directly in the browser using Monaco Editor
+- ✅ **Dry-Run Validation** — Test transformations on sample data before committing
+- ✅ **Transformation Versioning** — Track, rollback, and reorder transformation steps
+- ✅ **Auto DAG Generation** — Generate Airflow DAGs (Bronze, Silver, Gold, Master) from templates
+- ✅ **PostgreSQL Export** — Push Gold-layer data to PostgreSQL tables (append/replace/fail modes)
+- ✅ **Full Audit Trail** — Every generated code file is timestamped and saved to `generated_queries/`
+- ✅ **Multi-Source Support** — CSV, JSON, Parquet, REST API, Kafka, and Database sources
+- ✅ **Spark Cluster** — Dedicated Spark Master + Worker for distributed processing
+- ✅ **Dark-Themed UI** — Modern React + MUI dark theme with project-based navigation
+
+---
+
+## Project Structure
+
+```
+autonomous_pipeline/
+├── backend/                    # FastAPI backend application
+│   └── app/
+│       ├── main.py             # Application entry point & CORS config
+│       ├── config.py           # Pydantic settings (env-based config)
+│       ├── database.py         # SQLAlchemy session management
+│       ├── models/
+│       │   └── models.py       # SQLAlchemy ORM models (17+ tables)
+│       ├── routers/
+│       │   ├── pipelines.py    # Project CRUD + data source config
+│       │   ├── schemas.py      # Schema detection & Bronze ingestion trigger
+│       │   ├── bronze.py       # Bronze ingestion status & Spark preview
+│       │   ├── silver.py       # AI-driven Silver transformations
+│       │   ├── gold.py         # AI-driven Gold transformations + PG push
+│       │   ├── upload.py       # File upload management
+│       │   └── dags.py         # Airflow DAG generation & management
+│       ├── schemas/            # Pydantic request/response schemas
+│       └── services/
+│           ├── ai_service.py       # Gemini AI integration
+│           ├── schema_detection.py # Type inference & schema analysis
+│           ├── dag_generator.py    # Template-based DAG rendering
+│           ├── minio_service.py    # MinIO client utilities
+│           └── code_saver.py       # Generated code persistence
+├── frontend/                   # React TypeScript frontend
+│   └── src/
+│       ├── App.tsx             # Routes & dark theme config
+│       ├── components/
+│       │   └── Layout.tsx      # Sidebar + AppBar layout
+│       ├── pages/
+│       │   ├── ProjectsPage.tsx        # Project listing
+│       │   ├── CreateProjectPage.tsx    # New project wizard
+│       │   ├── ProjectDetailPage.tsx    # Project dashboard
+│       │   ├── CreateTaskPage.tsx       # Task creation
+│       │   ├── SchemaPreviewPage.tsx    # Schema review & confirm
+│       │   ├── SilverEnrichmentPage.tsx # AI chat + code editor
+│       │   └── GoldEnrichmentPage.tsx   # AI chat + code editor
+│       └── services/
+│           └── api.ts          # Axios API client
+├── dags/                       # Auto-generated Airflow DAGs
+├── data/                       # Sample / reference data files
+├── db/
+│   └── init.sql                # PostgreSQL schema (17+ tables)
+├── engine/                     # Execution engine modules
+├── generated_queries/          # Audit trail of all generated code
+├── logs/                       # Airflow task logs
+├── scripts/
+│   └── spark_master_entrypoint.sh
+├── docker-compose.yml          # Full stack orchestration (10 services)
+├── Dockerfile                  # Custom Airflow + Spark + Python image
+└── README.md
+```
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+| Requirement | Minimum Version |
+|---|---|
+| **Docker** | 24.0+ |
+| **Docker Compose** | v2.20+ |
+| **Google Gemini API Key** | Required for AI features |
+| **RAM** | 8 GB+ recommended |
+| **Disk** | 10 GB+ free space |
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/<your-username>/autonomous_pipeline.git
+cd autonomous_pipeline
+```
+
+### 2. Set Environment Variables
+
+Create a `.env` file in the project root:
+
+```bash
+# Required for AI-powered transformations
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# Optional: Override Airflow UID (default: 1000)
+AIRFLOW_UID=1000
+```
+
+### 3. Build and Start All Services
+
+```bash
+# Build the custom Docker image and start all 10 services
+docker compose up -d --build
+```
+
+> ⏳ **First run takes ~5–10 minutes** to build the image, download Spark/Hadoop JARs, initialize the database, and install frontend dependencies.
+
+### 4. Verify Services Are Running
+
+```bash
+docker compose ps
+```
+
+You should see all containers in a `healthy` or `running` state:
+
+```
+NAME                  STATUS
+ap-postgres           healthy
+ap-minio              healthy
+ap-redis              healthy
+ap-spark-master       healthy
+ap-spark-worker-1     running
+ap-backend            running
+ap-airflow-webserver  healthy
+ap-airflow-scheduler  healthy
+ap-frontend           running
+```
+
+### 5. Access the Applications
+
+| Service | URL | Credentials |
+|---|---|---|
+| **Frontend UI** | [http://localhost:3001](http://localhost:3001) | — |
+| **Backend API Docs** | [http://localhost:8000/docs](http://localhost:8000/docs) | — |
+| **Airflow UI** | [http://localhost:8085](http://localhost:8085) | `admin` / `admin` |
+| **MinIO Console** | [http://localhost:9011](http://localhost:9011) | `minioadmin` / `minioadmin` |
+| **Spark Master UI** | [http://localhost:8090](http://localhost:8090) | — |
+
+### 6. Stop All Services
+
+```bash
+docker compose down
+```
+
+To also remove persistent volumes (database, MinIO data, etc.):
+
+```bash
+docker compose down -v
+```
+
+---
+
+## Service Ports
+
+| Service | Host Port | Container Port | Notes |
+|---|---|---|---|
+| PostgreSQL | `5433` | `5432` | Metadata & Gold export |
+| MinIO API | `9010` | `9000` | S3-compatible API |
+| MinIO Console | `9011` | `9001` | Web UI |
+| Redis | `6380` | `6379` | Cache |
+| Spark Master | `7078` | `7077` | Cluster manager |
+| Spark Master UI | `8090` | `8080` | Web UI |
+| Spark Worker UI | `8091` | `8081` | Web UI |
+| FastAPI Backend | `8000` | `8000` | REST API |
+| Airflow UI | `8085` | `8080` | Web UI |
+| React Frontend | `3001` | `3000` | Dev server |
+
+---
+
+## Usage Workflow
+
+### Step 1: Create a Project
+Open the **Frontend UI** at `http://localhost:3001`, click **"New Project"**, provide a name, description, and source type (CSV, JSON, etc.).
+
+### Step 2: Upload Data Files
+Navigate to the project and upload your data files (CSV, JSON, or Parquet).
+
+### Step 3: Detect & Confirm Schema
+Click **"Detect Schema"** to auto-detect column names, types, and statistics. Review the schema preview and click **"Confirm"** to trigger Bronze ingestion.
+
+### Step 4: Silver Transformations (AI-Powered)
+Navigate to **Silver Enrichment** and chat with the AI:
+> *"Filter out rows where status is cancelled and add a column for flight duration in minutes"*
+
+The AI generates PySpark code. **Dry-run** it on sample data, iterate, then **confirm** the version.
+
+### Step 5: Gold Transformations (AI-Powered)
+Navigate to **Gold Enrichment** for aggregations, joins, and business-level transformations.
+
+### Step 6: Push to PostgreSQL
+Export Gold-layer data to a PostgreSQL table with append/replace/fail modes.
+
+### Step 7: Generate Airflow DAGs
+Auto-generate Bronze, Silver, Gold, and Master DAGs. Enable them in the Airflow UI for scheduled execution.
+
+---
+
+## API Endpoints
+
+### Pipelines
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/pipelines/` | Create a new pipeline |
+| `GET` | `/api/pipelines/` | List all pipelines |
+| `GET` | `/api/pipelines/{id}` | Get pipeline details |
+| `PUT` | `/api/pipelines/{id}` | Update pipeline |
+| `DELETE` | `/api/pipelines/{id}` | Delete pipeline |
+
+### Schema & Bronze
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/schemas/detect` | Auto-detect schema |
+| `POST` | `/api/schemas/confirm` | Confirm schema & ingest |
+| `GET` | `/api/bronze/{id}/preview` | Preview Bronze data |
+
+### Silver Transformations
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/silver/{id}/transformations` | Create transformation |
+| `POST` | `/api/silver/{id}/transformations/{tid}/chat` | AI chat |
+| `POST` | `/api/silver/{id}/transformations/{tid}/dry-run` | Dry-run code |
+| `POST` | `/api/silver/{id}/transformations/{tid}/confirm` | Confirm version |
+| `POST` | `/api/silver/{id}/upload-to-silver` | Execute pipeline |
+
+### Gold Transformations
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/gold/{id}/transformations` | Create transformation |
+| `POST` | `/api/gold/{id}/transformations/{tid}/chat` | AI chat |
+| `POST` | `/api/gold/{id}/upload-to-gold` | Execute pipeline |
+| `POST` | `/api/gold/{id}/push-to-postgres` | Export to PostgreSQL |
+
+### DAGs
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/dags/{id}/generate` | Generate all DAGs |
+| `GET` | `/api/dags/{id}` | List generated DAGs |
+
+> 📖 Full interactive API docs available at **[http://localhost:8000/docs](http://localhost:8000/docs)**
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | — | Google Gemini API key (required for AI features) |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model to use |
+| `DATABASE_URL` | `postgresql+psycopg2://pipeline:pipeline123@postgres:5432/autonomous_pipeline` | PostgreSQL connection |
+| `MINIO_ENDPOINT` | `http://minio:9000` | MinIO endpoint |
+| `AWS_ACCESS_KEY_ID` | `minioadmin` | MinIO access key |
+| `AWS_SECRET_ACCESS_KEY` | `minioadmin` | MinIO secret key |
+| `SPARK_MASTER_URL` | `local[*]` | Spark master URL |
+| `REDIS_URL` | `redis://redis:6379/0` | Redis connection |
+| `AIRFLOW_UID` | `1000` | Airflow user ID |
+
+---
+
+## License
+
+This project is for educational and development purposes.
+
+---
+
+<p align="center">
+  Built with ❤️ using FastAPI, React, Spark, Airflow, MinIO & Gemini AI
+</p>
