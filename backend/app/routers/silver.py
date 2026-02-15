@@ -796,6 +796,108 @@ def list_executions(
 # ============================================================================
 # Internal: PySpark execution
 # ============================================================================
+# ============================================================================
+# Safe exec() sandbox
+# ============================================================================
+
+_SAFE_BUILTINS = {
+    # Allowed builtins for transformation code — no file I/O, no eval/exec,
+    # no import manipulation, no process control.
+    k: v for k, v in __builtins__.items()  # type: ignore[union-attr]
+    if k not in {
+        'eval', 'exec', 'compile', '__import__', 'open',
+        'breakpoint', 'exit', 'quit', 'input',
+        'globals', 'locals', 'vars', 'dir',
+        'getattr', 'setattr', 'delattr',
+        'memoryview', 'classmethod', 'staticmethod',
+    }
+} if isinstance(__builtins__, dict) else {
+    k: getattr(__builtins__, k)
+    for k in dir(__builtins__)
+    if not k.startswith('_') and k not in {
+        'eval', 'exec', 'compile', '__import__', 'open',
+        'breakpoint', 'exit', 'quit', 'input',
+        'globals', 'locals', 'vars', 'dir',
+        'getattr', 'setattr', 'delattr',
+        'memoryview', 'classmethod', 'staticmethod',
+    }
+}
+
+
+def _safe_import(name, *args, **kwargs):
+    """Only allow importing data-processing libraries."""
+    ALLOWED_MODULES = {
+        'pyspark', 'pyspark.sql', 'pyspark.sql.functions',
+        'pyspark.sql.types', 'pyspark.sql.window',
+        'math', 'datetime', 'decimal', 'json', 're',
+        'collections', 'functools', 'itertools', 'operator',
+        'typing', 'string', 'hashlib', 'uuid',
+    }
+    top_level = name.split('.')[0]
+    if top_level not in {m.split('.')[0] for m in ALLOWED_MODULES} and name not in ALLOWED_MODULES:
+        raise ImportError(f"Import of '{name}' is not allowed in transformation code.")
+    return __builtins__['__import__'](name, *args, **kwargs) if isinstance(__builtins__, dict) \
+        else __import__(name, *args, **kwargs)
+
+
+def _build_safe_exec_globals() -> dict:
+    """Build a restricted globals dict for exec() to sandbox user/AI code."""
+    safe = {'__builtins__': {**_SAFE_BUILTINS, '__import__': _safe_import}}
+    return safe
+
+
+
+# ============================================================================
+# Safe exec() sandbox
+# ============================================================================
+
+_SAFE_BUILTINS = {
+    # Allowed builtins for transformation code — no file I/O, no eval/exec,
+    # no import manipulation, no process control.
+    k: v for k, v in __builtins__.items()  # type: ignore[union-attr]
+    if k not in {
+        'eval', 'exec', 'compile', '__import__', 'open',
+        'breakpoint', 'exit', 'quit', 'input',
+        'globals', 'locals', 'vars', 'dir',
+        'getattr', 'setattr', 'delattr',
+        'memoryview', 'classmethod', 'staticmethod',
+    }
+} if isinstance(__builtins__, dict) else {
+    k: getattr(__builtins__, k)
+    for k in dir(__builtins__)
+    if not k.startswith('_') and k not in {
+        'eval', 'exec', 'compile', '__import__', 'open',
+        'breakpoint', 'exit', 'quit', 'input',
+        'globals', 'locals', 'vars', 'dir',
+        'getattr', 'setattr', 'delattr',
+        'memoryview', 'classmethod', 'staticmethod',
+    }
+}
+
+
+def _safe_import(name, *args, **kwargs):
+    """Only allow importing data-processing libraries."""
+    ALLOWED_MODULES = {
+        'pyspark', 'pyspark.sql', 'pyspark.sql.functions',
+        'pyspark.sql.types', 'pyspark.sql.window',
+        'math', 'datetime', 'decimal', 'json', 're',
+        'collections', 'functools', 'itertools', 'operator',
+        'typing', 'string', 'hashlib', 'uuid',
+    }
+    top_level = name.split('.')[0]
+    if top_level not in {m.split('.')[0] for m in ALLOWED_MODULES} and name not in ALLOWED_MODULES:
+        raise ImportError(f"Import of '{name}' is not allowed in transformation code.")
+    return __builtins__['__import__'](name, *args, **kwargs) if isinstance(__builtins__, dict) \
+        else __import__(name, *args, **kwargs)
+
+
+def _build_safe_exec_globals() -> dict:
+    """Build a restricted globals dict for exec() to sandbox user/AI code."""
+    safe = {'__builtins__': {**_SAFE_BUILTINS, '__import__': _safe_import}}
+    return safe
+
+
+
 
 def _execute_dry_run(code: str, input_schema: list, sample_rows: list) -> dict:
     """Execute transform code on sample data using PySpark."""
@@ -809,6 +911,13 @@ def _execute_dry_run(code: str, input_schema: list, sample_rows: list) -> dict:
 
     spark = None
     try:
+        # Stop any existing session to avoid config bleed
+        try:
+            existing = SparkSession.getActiveSession()
+            if existing:
+                existing.stop()
+        except Exception:
+            pass
         spark = (
             SparkSession.builder
             .master("local[1]")
@@ -837,7 +946,7 @@ def _execute_dry_run(code: str, input_schema: list, sample_rows: list) -> dict:
             return {"success": False, "output_rows": [], "output_schema": [], "row_count": 0,
                     "error": "No sample data and no schema.", "validation_message": "Cannot create test DataFrame."}
 
-        exec_globals = {}
+        exec_globals = _build_safe_exec_globals()
         exec(code, exec_globals)
         transform_fn = exec_globals.get("transform")
         if not transform_fn:
@@ -882,6 +991,13 @@ def _execute_silver_upload(pipeline, transforms: list, db: Session) -> dict:
 
     spark = None
     try:
+        # Stop any existing session to avoid config bleed
+        try:
+            existing = SparkSession.getActiveSession()
+            if existing:
+                existing.stop()
+        except Exception:
+            pass
         spark = (
             SparkSession.builder
             .master("local[*]")
@@ -950,7 +1066,7 @@ def _execute_silver_upload(pipeline, transforms: list, db: Session) -> dict:
         for t in transforms:
             t_start = time.time()
             try:
-                exec_globals = {}
+                exec_globals = _build_safe_exec_globals()
                 exec(t.confirmed_code, exec_globals)
                 transform_fn = exec_globals.get("transform")
                 if not transform_fn:
@@ -1027,6 +1143,13 @@ def preview_silver_data(
 
     spark = None
     try:
+        # Stop any existing session to avoid config bleed
+        try:
+            existing = SparkSession.getActiveSession()
+            if existing:
+                existing.stop()
+        except Exception:
+            pass
         spark = (
             SparkSession.builder
             .master("local[1]")
