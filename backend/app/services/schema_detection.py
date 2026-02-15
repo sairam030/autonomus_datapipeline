@@ -32,6 +32,138 @@ from backend.app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# Kafka schema detection
+# =============================================================================
+
+def fetch_and_detect_kafka_schema(
+    kafka_bootstrap: str,
+    kafka_topic: str,
+    kafka_group_id: str | None = None,
+    kafka_config: dict | None = None,
+    pipeline_id: UUID | None = None,
+    sample_messages: int = 50,
+) -> "SchemaDetectionResult":
+    """
+    Consume a small sample of messages from a Kafka topic to detect the
+    JSON schema of incoming data.
+
+    Steps:
+    1. Connect to Kafka with a temporary consumer group (no offset commit)
+    2. Consume up to `sample_messages` from the topic
+    3. Deserialize JSON payloads
+    4. Convert to pandas DataFrame
+    5. Reuse _analyze_field() for type inference on each column
+    6. Return SchemaDetectionResult with virtual file info
+
+    Args:
+        kafka_bootstrap: Kafka broker addresses (comma-separated).
+        kafka_topic: Topic to consume from.
+        kafka_group_id: Consumer group (uses a temp group if not specified).
+        kafka_config: Extra consumer config (auto_offset_reset, timeout, etc.).
+        pipeline_id: UUID of the associated pipeline.
+        sample_messages: Number of messages to consume for detection.
+
+    Returns:
+        SchemaDetectionResult with detected fields and sample data.
+    """
+    import json as _json
+    from kafka import KafkaConsumer
+
+    extra = kafka_config or {}
+    offset_reset = extra.get("auto_offset_reset", "earliest")
+    timeout_ms = extra.get("consumer_timeout_ms", 15000)
+
+    # Use a temporary group so we never commit offsets for detection
+    temp_group = f"schema_detect_{pipeline_id or 'tmp'}_{int(datetime.now(timezone.utc).timestamp())}"
+
+    logger.info(
+        "Detecting Kafka schema: bootstrap=%s topic=%s sample=%d",
+        kafka_bootstrap, kafka_topic, sample_messages,
+    )
+
+    try:
+        consumer = KafkaConsumer(
+            kafka_topic,
+            bootstrap_servers=kafka_bootstrap.split(","),
+            group_id=temp_group,
+            auto_offset_reset=offset_reset,
+            enable_auto_commit=False,      # Don't commit offsets for detection
+            consumer_timeout_ms=timeout_ms,
+            value_deserializer=lambda v: _json.loads(v.decode("utf-8")),
+        )
+    except Exception as e:
+        raise ValueError(f"Failed to connect to Kafka: {e}") from e
+
+    records = []
+    try:
+        for msg in consumer:
+            if isinstance(msg.value, dict):
+                records.append(msg.value)
+            elif isinstance(msg.value, list):
+                records.extend(msg.value)
+            else:
+                records.append({"value": str(msg.value)})
+
+            if len(records) >= sample_messages:
+                break
+    except Exception as e:
+        logger.error("Error consuming Kafka messages: %s", e)
+        raise ValueError(f"Error consuming messages: {e}") from e
+    finally:
+        consumer.close()
+
+    if not records:
+        raise ValueError(
+            f"No messages found on topic '{kafka_topic}'. "
+            f"Make sure the topic has data and the producer is running."
+        )
+
+    logger.info("Consumed %d sample messages from topic '%s'", len(records), kafka_topic)
+
+    # Convert to DataFrame and detect schema
+    df = pd.DataFrame(records)
+
+    if df.empty:
+        raise ValueError("Consumed messages could not be converted to a DataFrame.")
+
+    fields: list[FieldSchema] = []
+    for col in df.columns:
+        field = _analyze_field(col, df[col], len(df))
+        fields.append(field)
+
+    # Confidence
+    field_confidences = [f.confidence for f in fields]
+    avg_confidence = sum(field_confidences) / len(field_confidences) if field_confidences else 0.0
+    overall_confidence = round(avg_confidence, 3)
+
+    # Build a virtual FileInfo representing the Kafka topic
+    virtual_file = FileInfo(
+        path=f"kafka://{kafka_bootstrap}/{kafka_topic}",
+        filename=kafka_topic,
+        size_bytes=0,
+        row_count=len(records),
+        schema_match=True,
+    )
+
+    logger.info(
+        "Kafka schema detected: %d fields, %d sample rows, confidence=%.3f",
+        len(fields), len(records), overall_confidence,
+    )
+
+    return SchemaDetectionResult(
+        pipeline_id=pipeline_id,
+        schema_version=1,
+        fields=fields,
+        total_files=1,
+        compatible_files=[virtual_file],
+        incompatible_files=[],
+        sample_row_count=len(df),
+        detection_confidence=overall_confidence,
+        detected_at=datetime.now(timezone.utc),
+    )
+
 # =============================================================================
 # Type detection heuristics
 # =============================================================================

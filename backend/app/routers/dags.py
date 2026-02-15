@@ -69,6 +69,11 @@ class TaskDAGRequest(BaseModel):
     source_type: Optional[str] = None
     source_config: Optional[dict] = None
 
+    # Gold-only: push to Postgres after Gold upload
+    push_to_postgres: bool = Field(False, description="If true, push Gold data to a Postgres table after upload.")
+    postgres_table_name: Optional[str] = Field(None, description="Postgres table name for push.")
+    postgres_if_exists: str = Field("replace", description="Behavior if table exists: replace, append, fail.")
+
 
 class MasterDAGRequest(BaseModel):
     """Request to create a master DAG that chains task DAGs in order."""
@@ -138,6 +143,21 @@ def create_task_dag(
     else:
         source_config = {}
 
+    # For Kafka/API sources, inject the bronze_base_path so the DAG writes
+    # to the same location the DB expects Silver to read from.
+    if source_type == "kafka":
+        from backend.app.models.models import SchemaRegistry, BronzeIngestion
+        latest_ingestion = (
+            db.query(BronzeIngestion)
+            .filter(BronzeIngestion.pipeline_id == project_id)
+            .order_by(BronzeIngestion.created_at.desc())
+            .first()
+        )
+        if latest_ingestion and latest_ingestion.bronze_path:
+            # Extract the relative path after "s3a://bronze/"
+            bp = latest_ingestion.bronze_path
+            source_config["bronze_base_path"] = bp.replace("s3a://bronze/", "") if bp.startswith("s3a://bronze/") else bp
+
     # Parse start date
     try:
         start_date = datetime.strptime(req.start_date, "%Y-%m-%d") if req.start_date else None
@@ -161,35 +181,28 @@ def create_task_dag(
                 task_label=req.task_label,
             )
         elif req.task_type == "silver":
-            # Silver DAG generation — placeholder for now
-            result = generator.generate_bronze_dag(
+            result = generator.generate_silver_dag(
                 project_name=pipeline.name,
                 project_id=str(project_id),
-                source_type=source_type,
-                source_config=source_config,
                 schedule=req.schedule,
                 start_date=start_date,
                 retries=req.retries,
                 retry_delay_min=req.retry_delay_min,
                 owner=req.owner,
-                task_label=req.task_label or "silver",
             )
-            result["dag_type"] = "silver"
         elif req.task_type == "gold":
-            # Gold DAG generation — placeholder for now
-            result = generator.generate_bronze_dag(
+            result = generator.generate_gold_dag(
                 project_name=pipeline.name,
                 project_id=str(project_id),
-                source_type=source_type,
-                source_config=source_config,
                 schedule=req.schedule,
                 start_date=start_date,
                 retries=req.retries,
                 retry_delay_min=req.retry_delay_min,
                 owner=req.owner,
-                task_label=req.task_label or "gold",
+                push_to_postgres=req.push_to_postgres,
+                postgres_table_name=req.postgres_table_name or "",
+                postgres_if_exists=req.postgres_if_exists,
             )
-            result["dag_type"] = "gold"
     except Exception as e:
         logger.error("Task DAG generation failed: %s", e, exc_info=True)
         raise HTTPException(500, f"Task DAG generation failed: {str(e)}")
@@ -273,6 +286,19 @@ def generate_dags(
         source_config = _build_source_config(data_source)
     else:
         source_config = {}
+
+    # For Kafka sources, inject bronze_base_path
+    if source_type == "kafka":
+        from backend.app.models.models import BronzeIngestion
+        latest_ingestion = (
+            db.query(BronzeIngestion)
+            .filter(BronzeIngestion.pipeline_id == project_id)
+            .order_by(BronzeIngestion.created_at.desc())
+            .first()
+        )
+        if latest_ingestion and latest_ingestion.bronze_path:
+            bp = latest_ingestion.bronze_path
+            source_config["bronze_base_path"] = bp.replace("s3a://bronze/", "") if bp.startswith("s3a://bronze/") else bp
 
     # Parse start date
     try:

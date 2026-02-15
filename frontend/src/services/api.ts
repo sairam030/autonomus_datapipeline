@@ -105,6 +105,18 @@ export const pipelineApi = {
 
   configureSource: (pipelineId: string, sourceConfig: any) =>
     api.post(`/api/pipelines/${pipelineId}/source`, sourceConfig).then(r => r.data),
+
+  /** Test Kafka broker connectivity (requires source already saved) */
+  testKafkaConnection: (pipelineId: string) =>
+    api.post(`/api/pipelines/${pipelineId}/kafka/test-connection`).then(r => r.data),
+
+  /** List available Kafka topics (requires source already saved) */
+  listKafkaTopics: (pipelineId: string) =>
+    api.get(`/api/pipelines/${pipelineId}/kafka/topics`).then(r => r.data),
+
+  /** Test Kafka connection directly with bootstrap servers (before source is saved) */
+  testKafkaConnectionDirect: (bootstrapServers: string) =>
+    api.post(`/api/pipelines/kafka/test-connection-direct?bootstrap_servers=${encodeURIComponent(bootstrapServers)}`).then(r => r.data),
 };
 
 // ============================================================================
@@ -210,6 +222,9 @@ export interface TaskDAGRequest {
   owner?: string;
   source_type?: string;
   source_config?: any;
+  push_to_postgres?: boolean;
+  postgres_table_name?: string;
+  postgres_if_exists?: string;
 }
 
 export interface MasterDAGRequest {
@@ -498,6 +513,12 @@ export interface PostgresPushRecord {
 }
 
 export const goldApi = {
+  /** Refresh Gold schema from latest Silver output */
+  refreshSchema: (projectId: string) =>
+    api.post<{ updated: number; columns: string[]; sample_rows: number }>(
+      `/api/gold/${projectId}/refresh-schema`
+    ).then(r => r.data),
+
   /** Create a new Gold transformation */
   create: (projectId: string, data: { name: string; description?: string }) =>
     api.post<GoldTransformation>(`/api/gold/${projectId}/transformations`, data).then(r => r.data),

@@ -222,6 +222,15 @@ export default function GoldEnrichmentPage() {
   }, [projectId, transformId]);
 
   useEffect(() => { loadTransformList(); loadCurrentTransform(); }, [loadTransformList, loadCurrentTransform]);
+
+  // Auto-refresh Gold schema from latest Silver output on page load
+  useEffect(() => {
+    if (!projectId) return;
+    goldApi.refreshSchema(projectId).catch(() => {
+      // Silently ignore — Silver may not have been run yet
+    });
+  }, [projectId]);
+
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
   // =========================================================================

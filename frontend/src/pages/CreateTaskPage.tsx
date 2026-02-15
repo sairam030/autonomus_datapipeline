@@ -6,7 +6,7 @@ import {
   RadioGroup, FormControlLabel, Radio, FormLabel,
   LinearProgress, IconButton, List, ListItem, ListItemIcon,
   ListItemText, ListItemSecondaryAction, Paper, Chip,
-  Tabs, Tab, Switch,
+  Tabs, Tab, Switch, CircularProgress,
 } from '@mui/material';
 import {
   CloudUpload as UploadIcon,
@@ -14,6 +14,9 @@ import {
   Delete as DeleteIcon,
   Api as ApiIcon,
   Stream as KafkaIcon,
+  CheckCircle as ConnectedIcon,
+  Error as ErrorIcon,
+  Refresh as RefreshIcon,
 } from '@mui/icons-material';
 import { pipelineApi, uploadApi, SourceType } from '../services/api';
 
@@ -71,6 +74,12 @@ export default function CreateTaskPage() {
   const [kafkaOffsetReset, setKafkaOffsetReset] = useState('earliest');
   const [kafkaMaxMessages, setKafkaMaxMessages] = useState(10000);
   const [kafkaTimeout, setKafkaTimeout] = useState(30000);
+
+  // ---------- KAFKA connectivity state ----------
+  const [kafkaTestStatus, setKafkaTestStatus] = useState<'idle' | 'testing' | 'connected' | 'failed'>('idle');
+  const [kafkaTestError, setKafkaTestError] = useState<string | null>(null);
+  const [kafkaAvailableTopics, setKafkaAvailableTopics] = useState<{ name: string; partitions: number }[]>([]);
+  const [kafkaBrokers, setKafkaBrokers] = useState<{ id: number; host: string; port: number }[]>([]);
 
   // ---------- Common state ----------
   const [uploading, setUploading] = useState(false);
@@ -247,11 +256,38 @@ export default function CreateTaskPage() {
         },
       });
 
-      navigate(`/project/${projectId}`);
+      navigate(`/project/${projectId}/task/bronze/schema`);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to configure Kafka source');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // =========================================================================
+  // Kafka test connection
+  // =========================================================================
+  const handleTestKafkaConnection = async () => {
+    if (!kafkaBootstrap.trim()) {
+      setError('Enter Kafka bootstrap servers first');
+      return;
+    }
+    setKafkaTestStatus('testing');
+    setKafkaTestError(null);
+    setKafkaAvailableTopics([]);
+    setKafkaBrokers([]);
+    try {
+      const result = await pipelineApi.testKafkaConnectionDirect(kafkaBootstrap);
+      setKafkaTestStatus('connected');
+      setKafkaBrokers(result.brokers || []);
+      setKafkaAvailableTopics(result.topics || []);
+      // Auto-select first topic if none set
+      if (!kafkaTopic && result.topics?.length > 0) {
+        setKafkaTopic(result.topics[0].name);
+      }
+    } catch (err: any) {
+      setKafkaTestStatus('failed');
+      setKafkaTestError(err.response?.data?.detail || 'Connection failed');
     }
   };
 
@@ -516,47 +552,107 @@ export default function CreateTaskPage() {
       {/* KAFKA SOURCE */}
       {/* ================================================================== */}
       {sourceMode === 'kafka' && (
-        <Card sx={{ mb: 3 }}>
-          <CardContent>
-            <Typography variant="h6" gutterBottom>Kafka Configuration</Typography>
-            <Grid container spacing={2}>
-              <Grid item xs={12}>
-                <TextField fullWidth label="Bootstrap Servers"
-                  placeholder="kafka:9092, kafka-2:9092"
-                  value={kafkaBootstrap} onChange={e => setKafkaBootstrap(e.target.value)} size="small"
-                  helperText="Comma-separated list of Kafka broker addresses" />
+        <>
+          {/* Kafka Connection */}
+          <Card sx={{ mb: 3 }}>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>Kafka Connection</Typography>
+              <Grid container spacing={2} alignItems="flex-start">
+                <Grid item xs={9}>
+                  <TextField fullWidth label="Bootstrap Servers"
+                    placeholder="kafka:9092 (Docker) or localhost:9093 (host)"
+                    value={kafkaBootstrap} onChange={e => { setKafkaBootstrap(e.target.value); setKafkaTestStatus('idle'); }}
+                    size="small"
+                    helperText="Comma-separated list of Kafka broker addresses" />
+                </Grid>
+                <Grid item xs={3}>
+                  <Button
+                    fullWidth variant="outlined" size="large"
+                    onClick={handleTestKafkaConnection}
+                    disabled={kafkaTestStatus === 'testing' || !kafkaBootstrap.trim()}
+                    color={kafkaTestStatus === 'connected' ? 'success' : kafkaTestStatus === 'failed' ? 'error' : 'primary'}
+                    startIcon={
+                      kafkaTestStatus === 'testing' ? <CircularProgress size={18} /> :
+                      kafkaTestStatus === 'connected' ? <ConnectedIcon /> :
+                      kafkaTestStatus === 'failed' ? <ErrorIcon /> :
+                      <RefreshIcon />
+                    }
+                    sx={{ height: 40 }}
+                  >
+                    {kafkaTestStatus === 'testing' ? 'Testing...' :
+                     kafkaTestStatus === 'connected' ? 'Connected' :
+                     kafkaTestStatus === 'failed' ? 'Failed' : 'Test'}
+                  </Button>
+                </Grid>
               </Grid>
-              <Grid item xs={6}>
-                <TextField fullWidth label="Topic" placeholder="my-topic"
-                  value={kafkaTopic} onChange={e => setKafkaTopic(e.target.value)} size="small" />
+
+              {kafkaTestStatus === 'failed' && kafkaTestError && (
+                <Alert severity="error" sx={{ mt: 2 }}>{kafkaTestError}</Alert>
+              )}
+
+              {kafkaTestStatus === 'connected' && (
+                <Alert severity="success" sx={{ mt: 2 }}>
+                  Connected to {kafkaBrokers.length} broker{kafkaBrokers.length !== 1 ? 's' : ''}
+                  {kafkaBrokers.length > 0 && ` (${kafkaBrokers.map(b => `${b.host}:${b.port}`).join(', ')})`}
+                  {' — '}{kafkaAvailableTopics.length} topic{kafkaAvailableTopics.length !== 1 ? 's' : ''} available
+                </Alert>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Kafka Topic & Consumer Config */}
+          <Card sx={{ mb: 3 }}>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>Topic & Consumer Settings</Typography>
+              <Grid container spacing={2}>
+                <Grid item xs={6}>
+                  {kafkaAvailableTopics.length > 0 ? (
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Topic</InputLabel>
+                      <Select value={kafkaTopic} label="Topic"
+                        onChange={e => setKafkaTopic(e.target.value)}>
+                        {kafkaAvailableTopics.map(t => (
+                          <MenuItem key={t.name} value={t.name}>
+                            {t.name} ({t.partitions} partition{t.partitions !== 1 ? 's' : ''})
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  ) : (
+                    <TextField fullWidth label="Topic" placeholder="flight-data"
+                      value={kafkaTopic} onChange={e => setKafkaTopic(e.target.value)} size="small"
+                      helperText="Test connection first to auto-discover topics" />
+                  )}
+                </Grid>
+                <Grid item xs={6}>
+                  <TextField fullWidth label="Consumer Group ID" placeholder="auto-generated if empty"
+                    value={kafkaGroupId} onChange={e => setKafkaGroupId(e.target.value)} size="small"
+                    helperText="Kafka tracks offsets per group" />
+                </Grid>
+                <Grid item xs={4}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Offset Reset</InputLabel>
+                    <Select value={kafkaOffsetReset} label="Offset Reset"
+                      onChange={e => setKafkaOffsetReset(e.target.value)}>
+                      <MenuItem value="earliest">Earliest</MenuItem>
+                      <MenuItem value="latest">Latest</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+                <Grid item xs={4}>
+                  <TextField fullWidth label="Max Messages" type="number" value={kafkaMaxMessages}
+                    onChange={e => setKafkaMaxMessages(parseInt(e.target.value) || 10000)} size="small"
+                    helperText="Per DAG run" />
+                </Grid>
+                <Grid item xs={4}>
+                  <TextField fullWidth label="Timeout (ms)" type="number" value={kafkaTimeout}
+                    onChange={e => setKafkaTimeout(parseInt(e.target.value) || 30000)} size="small"
+                    helperText="Consumer poll timeout" />
+                </Grid>
               </Grid>
-              <Grid item xs={6}>
-                <TextField fullWidth label="Consumer Group ID" placeholder="auto-generated if empty"
-                  value={kafkaGroupId} onChange={e => setKafkaGroupId(e.target.value)} size="small" />
-              </Grid>
-              <Grid item xs={4}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>Offset Reset</InputLabel>
-                  <Select value={kafkaOffsetReset} label="Offset Reset"
-                    onChange={e => setKafkaOffsetReset(e.target.value)}>
-                    <MenuItem value="earliest">Earliest</MenuItem>
-                    <MenuItem value="latest">Latest</MenuItem>
-                  </Select>
-                </FormControl>
-              </Grid>
-              <Grid item xs={4}>
-                <TextField fullWidth label="Max Messages" type="number" value={kafkaMaxMessages}
-                  onChange={e => setKafkaMaxMessages(parseInt(e.target.value) || 10000)} size="small"
-                  helperText="Per DAG run" />
-              </Grid>
-              <Grid item xs={4}>
-                <TextField fullWidth label="Timeout (ms)" type="number" value={kafkaTimeout}
-                  onChange={e => setKafkaTimeout(parseInt(e.target.value) || 30000)} size="small"
-                  helperText="Consumer timeout" />
-              </Grid>
-            </Grid>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        </>
       )}
 
       {/* Actions */}
@@ -576,7 +672,9 @@ export default function CreateTaskPage() {
             ? (uploading ? 'Uploading...' : 'Configuring...')
             : sourceMode === 'file'
               ? 'Upload & Detect Schema'
-              : 'Save & Configure Source'
+              : sourceMode === 'kafka'
+                ? 'Save & Detect Schema'
+                : 'Save & Configure Source'
           }
         </Button>
       </Box>

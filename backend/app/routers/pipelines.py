@@ -1,6 +1,6 @@
 """
 Pipeline management API routes.
-CRUD operations for pipelines.
+CRUD operations for pipelines + Kafka connectivity helpers.
 """
 
 import logging
@@ -120,16 +120,22 @@ def update_pipeline(pipeline_id: UUID, payload: PipelineUpdate, db: Session = De
 
 @router.delete("/{pipeline_id}", status_code=204)
 def delete_pipeline(pipeline_id: UUID, db: Session = Depends(get_db)):
-    """Delete a pipeline and all associated data."""
+    """Delete a pipeline and all associated data, including generated DAG files."""
     pipeline = db.query(Pipeline).filter(Pipeline.id == pipeline_id).first()
     if not pipeline:
         raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    # Delete all generated DAG files for this project
+    from backend.app.services.dag_generator import DAGGenerator
+    generator = DAGGenerator()
+    deleted_count = generator.delete_project_dags(str(pipeline_id))
+    logger.info("Deleted %d DAG files for project %s", deleted_count, pipeline_id)
 
     db.add(AuditLog(
         entity_type="pipeline",
         entity_id=pipeline.id,
         action="deleted",
-        old_value={"name": pipeline.name},
+        old_value={"name": pipeline.name, "dags_deleted": deleted_count},
     ))
     db.delete(pipeline)
     db.commit()
@@ -205,10 +211,10 @@ def configure_data_source(
 
     db.add(ds)
 
-    # Sync pipeline source_type and advance status for API/Kafka sources
+    # Sync pipeline source_type and advance status for API sources
     pipeline.source_type = payload.source_type.value
-    if payload.source_type in (SourceType.api, SourceType.kafka):
-        # API/Kafka don't have schema detection, mark as configured
+    if payload.source_type == SourceType.api:
+        # API sources without local files — mark as configured
         if pipeline.status == "draft":
             pipeline.status = "bronze_ready"
 
@@ -217,3 +223,136 @@ def configure_data_source(
 
     logger.info(f"Data source configured for pipeline {pipeline_id}: {ds.source_type}")
     return ds
+
+
+# =============================================================================
+# Kafka Connectivity Helpers
+# =============================================================================
+
+@router.post("/{pipeline_id}/kafka/test-connection")
+def test_kafka_connection(pipeline_id: UUID, db: Session = Depends(get_db)):
+    """
+    Test connectivity to the configured Kafka broker.
+    Returns broker metadata if successful.
+    """
+    pipeline = db.query(Pipeline).filter(Pipeline.id == pipeline_id).first()
+    if not pipeline:
+        raise HTTPException(404, "Pipeline not found")
+
+    data_source = db.query(DataSource).filter(DataSource.pipeline_id == pipeline_id).first()
+    if not data_source or data_source.source_type != "kafka":
+        raise HTTPException(400, "No Kafka source configured for this pipeline")
+
+    bootstrap = data_source.kafka_bootstrap
+    if not bootstrap:
+        raise HTTPException(400, "kafka_bootstrap not set")
+
+    try:
+        from confluent_kafka.admin import AdminClient
+
+        admin = AdminClient({"bootstrap.servers": bootstrap, "socket.timeout.ms": 10000})
+        metadata = admin.list_topics(timeout=10)
+
+        brokers = [
+            {"id": b.id, "host": b.host, "port": b.port}
+            for b in metadata.brokers.values()
+        ]
+        topics = sorted(metadata.topics.keys())
+
+        logger.info(f"Kafka connection test successful for pipeline {pipeline_id}: {len(brokers)} broker(s)")
+        return {
+            "status": "connected",
+            "bootstrap_servers": bootstrap,
+            "brokers": brokers,
+            "topic_count": len(topics),
+            "topics": topics,
+        }
+
+    except ImportError:
+        raise HTTPException(500, "confluent-kafka package not installed")
+    except Exception as e:
+        logger.error(f"Kafka connection test failed: {e}")
+        raise HTTPException(400, f"Kafka connection failed: {str(e)}")
+
+
+@router.get("/{pipeline_id}/kafka/topics")
+def list_kafka_topics(pipeline_id: UUID, db: Session = Depends(get_db)):
+    """
+    List all available topics from the configured Kafka broker.
+    Useful for topic auto-discovery in the frontend.
+    """
+    pipeline = db.query(Pipeline).filter(Pipeline.id == pipeline_id).first()
+    if not pipeline:
+        raise HTTPException(404, "Pipeline not found")
+
+    data_source = db.query(DataSource).filter(DataSource.pipeline_id == pipeline_id).first()
+    if not data_source or data_source.source_type != "kafka":
+        raise HTTPException(400, "No Kafka source configured for this pipeline")
+
+    bootstrap = data_source.kafka_bootstrap
+    if not bootstrap:
+        raise HTTPException(400, "kafka_bootstrap not set")
+
+    try:
+        from confluent_kafka.admin import AdminClient
+
+        admin = AdminClient({"bootstrap.servers": bootstrap, "socket.timeout.ms": 10000})
+        metadata = admin.list_topics(timeout=10)
+
+        topics = []
+        for name, topic_meta in metadata.topics.items():
+            # Skip internal topics
+            if name.startswith("__"):
+                continue
+            topics.append({
+                "name": name,
+                "partitions": len(topic_meta.partitions),
+            })
+
+        topics.sort(key=lambda t: t["name"])
+        return {"topics": topics, "total": len(topics)}
+
+    except ImportError:
+        raise HTTPException(500, "confluent-kafka package not installed")
+    except Exception as e:
+        logger.error(f"Kafka topic listing failed: {e}")
+        raise HTTPException(400, f"Failed to list topics: {str(e)}")
+
+
+@router.post("/kafka/test-connection-direct")
+def test_kafka_connection_direct(bootstrap_servers: str):
+    """
+    Test Kafka broker connectivity without needing a saved pipeline.
+    Used by the frontend before the source is saved.
+    """
+    if not bootstrap_servers.strip():
+        raise HTTPException(400, "bootstrap_servers is required")
+
+    try:
+        from confluent_kafka.admin import AdminClient
+
+        admin = AdminClient({"bootstrap.servers": bootstrap_servers, "socket.timeout.ms": 10000})
+        metadata = admin.list_topics(timeout=10)
+
+        brokers = [
+            {"id": b.id, "host": b.host, "port": b.port}
+            for b in metadata.brokers.values()
+        ]
+        topics = [
+            {"name": name, "partitions": len(t.partitions)}
+            for name, t in metadata.topics.items()
+            if not name.startswith("__")
+        ]
+        topics.sort(key=lambda t: t["name"])
+
+        return {
+            "status": "connected",
+            "bootstrap_servers": bootstrap_servers,
+            "brokers": brokers,
+            "topics": topics,
+        }
+
+    except ImportError:
+        raise HTTPException(500, "confluent-kafka package not installed")
+    except Exception as e:
+        raise HTTPException(400, f"Kafka connection failed: {str(e)}")

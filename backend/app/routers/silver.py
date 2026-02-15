@@ -24,12 +24,17 @@ from sqlalchemy.orm import Session
 from backend.app.database import get_db
 from backend.app.models.models import (
     Pipeline, SchemaRegistry, SilverTransformation, ConversationMessage,
-    SilverExecution, BronzeIngestion,
+    SilverExecution, BronzeIngestion, GoldTransformation,
 )
 from backend.app.services.ai_service import generate_transformation, validate_transform_code
 from backend.app.services.code_saver import (
     save_silver_ai_generated, save_silver_confirmed,
-    save_silver_dry_run, save_silver_upload_pipeline, save_code_edit,
+    save_silver_dry_run, save_code_edit,
+)
+from backend.app.services.sandbox import build_sample_rows_from_schema, execute_dry_run
+from backend.app.services.silver_service import execute_silver_upload
+from backend.app.services.spark_utils import (
+    get_silver_schema_and_samples, preview_data_from_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,41 +135,6 @@ class UploadToSilverResponse(BaseModel):
 # Helpers
 # ============================================================================
 
-def _build_sample_rows_from_schema(input_schema: list, num_rows: int = 10) -> list:
-    """Synthesize sample rows from schema's sample_values."""
-    if not input_schema:
-        return []
-    TYPE_CASTERS = {
-        "integer": lambda v: int(v) if v is not None else None,
-        "long": lambda v: int(v) if v is not None else None,
-        "float": lambda v: float(v) if v is not None else None,
-        "double": lambda v: float(v) if v is not None else None,
-        "boolean": lambda v: (str(v).lower() in ("true", "1", "yes")) if v is not None else None,
-        "string": lambda v: str(v) if v is not None else None,
-    }
-    rows = []
-    for i in range(num_rows):
-        row = {}
-        for field in input_schema:
-            name = field.get("name", "col")
-            dtype = field.get("detected_type", field.get("type", "string")).lower()
-            samples = field.get("sample_values", [])
-            nullable = field.get("nullable", True)
-            if samples:
-                raw = samples[i % len(samples)]
-            elif nullable:
-                raw = None
-            else:
-                raw = "" if dtype == "string" else 0
-            caster = TYPE_CASTERS.get(dtype, TYPE_CASTERS["string"])
-            try:
-                row[name] = caster(raw)
-            except (ValueError, TypeError):
-                row[name] = raw
-        rows.append(row)
-    return rows
-
-
 def _get_transformation(db: Session, project_id: UUID, transform_id: UUID) -> SilverTransformation:
     t = (
         db.query(SilverTransformation)
@@ -222,7 +192,7 @@ def create_transformation(
         .first()
     )
     input_schema = schema_reg.fields if schema_reg else []
-    sample_input = _build_sample_rows_from_schema(input_schema, num_rows=10)
+    sample_input = build_sample_rows_from_schema(input_schema, num_rows=10)
 
     existing_count = (
         db.query(SilverTransformation)
@@ -299,7 +269,7 @@ def get_messages(
     transform_id: UUID,
     db: Session = Depends(get_db),
 ):
-    t = _get_transformation(db, project_id, transform_id)
+    _get_transformation(db, project_id, transform_id)
     messages = (
         db.query(ConversationMessage)
         .filter(ConversationMessage.transformation_id == transform_id)
@@ -369,7 +339,6 @@ def send_chat_message(
     if ai_result["type"] == "code" and ai_result.get("code"):
         t.generated_code = ai_result["code"]
         t.status = "code_generated"
-        # Save to local filesystem for reference
         try:
             pipeline = db.query(Pipeline).filter(Pipeline.id == project_id).first()
             save_silver_ai_generated(
@@ -435,7 +404,6 @@ def update_code(
     t.generated_code = req.code
     t.status = "code_reviewed"
     db.commit()
-    # Save manual edit to disk
     try:
         pipeline = db.query(Pipeline).filter(Pipeline.id == project_id).first()
         save_code_edit(
@@ -465,11 +433,10 @@ def dry_run(
 
     sample_data = t.sample_input or []
     if not sample_data and t.input_schema:
-        sample_data = _build_sample_rows_from_schema(t.input_schema, num_rows=10)
+        sample_data = build_sample_rows_from_schema(t.input_schema, num_rows=10)
         t.sample_input = sample_data
         db.commit()
 
-    # Save dry-run code to disk
     try:
         pipeline = db.query(Pipeline).filter(Pipeline.id == project_id).first()
         save_silver_dry_run(
@@ -481,7 +448,7 @@ def dry_run(
         logger.warning("Could not save dry-run code to disk: %s", save_err)
 
     try:
-        result = _execute_dry_run(code, t.input_schema or [], sample_data)
+        result = execute_dry_run(code, t.input_schema or [], sample_data)
         if result["success"]:
             t.sample_output = result["output_rows"]
             t.output_schema = result["output_schema"]
@@ -517,12 +484,10 @@ def confirm_transformation(
 
     # If already confirmed and code is different → create a new version
     if t.status == "confirmed" and t.confirmed_code and t.confirmed_code.strip() != req.code.strip():
-        # Archive the current one
         t.is_active = False
         t.status = "archived"
         db.flush()
 
-        # Create new version
         new_version = t.version + 1
         new_t = SilverTransformation(
             pipeline_id=t.pipeline_id,
@@ -544,26 +509,24 @@ def confirm_transformation(
         db.commit()
         db.refresh(new_t)
 
-        # Copy conversation messages to new transformation
         old_messages = (
             db.query(ConversationMessage)
             .filter(ConversationMessage.transformation_id == transform_id)
             .order_by(ConversationMessage.message_order)
             .all()
         )
-        for msg in old_messages:
+        for msg_obj in old_messages:
             new_msg = ConversationMessage(
                 transformation_id=new_t.id,
-                role=msg.role,
-                content=msg.content,
-                code_block=msg.code_block,
-                dry_run_result=msg.dry_run_result,
-                message_order=msg.message_order,
+                role=msg_obj.role,
+                content=msg_obj.content,
+                code_block=msg_obj.code_block,
+                dry_run_result=msg_obj.dry_run_result,
+                message_order=msg_obj.message_order,
             )
             db.add(new_msg)
         db.commit()
 
-        # Save new version code to disk
         try:
             pipeline_obj = db.query(Pipeline).filter(Pipeline.id == project_id).first()
             save_silver_confirmed(
@@ -577,7 +540,6 @@ def confirm_transformation(
         logger.info("Created version %d for transformation '%s'", new_version, req.name)
         return _to_response(new_t)
     else:
-        # First confirm or re-confirm with same code
         t.name = req.name
         t.confirmed_code = req.code
         t.generated_code = req.code
@@ -591,7 +553,6 @@ def confirm_transformation(
             pipeline.status = "silver_configured"
             db.commit()
 
-        # Save confirmed code to disk
         try:
             save_silver_confirmed(
                 project_name=pipeline.name if pipeline else str(project_id),
@@ -668,7 +629,6 @@ def upload_to_silver(
     if not pipeline:
         raise HTTPException(404, "Project not found")
 
-    # Get confirmed active transformations in order
     if req.transformation_ids:
         transforms = []
         for tid in req.transformation_ids:
@@ -693,7 +653,6 @@ def upload_to_silver(
     if not transforms:
         raise HTTPException(400, "No confirmed transformations to apply. Confirm at least one transformation first.")
 
-    # Create execution record
     execution = SilverExecution(
         pipeline_id=project_id,
         transformation_ids=[str(t.id) for t in transforms],
@@ -706,7 +665,7 @@ def upload_to_silver(
     start_time = time.time()
 
     try:
-        result = _execute_silver_upload(
+        result = execute_silver_upload(
             pipeline=pipeline,
             transforms=transforms,
             db=db,
@@ -724,9 +683,25 @@ def upload_to_silver(
 
         transform_results = result.get("transform_results", [])
 
-        # Update pipeline status
         pipeline.status = "active"
         db.commit()
+
+        # Auto-refresh Gold transformation schemas with new Silver output
+        try:
+            gold_schema, gold_samples = get_silver_schema_and_samples(db, project_id)
+            gold_transforms = (
+                db.query(GoldTransformation)
+                .filter(GoldTransformation.pipeline_id == project_id)
+                .all()
+            )
+            for gt in gold_transforms:
+                gt.input_schema = gold_schema
+                gt.sample_input = gold_samples
+            if gold_transforms:
+                db.commit()
+                logger.info("Auto-refreshed %d Gold transformation(s) with new Silver schema", len(gold_transforms))
+        except Exception as refresh_err:
+            logger.warning("Could not auto-refresh Gold schemas: %s", refresh_err)
 
         return UploadToSilverResponse(
             success=True,
@@ -794,323 +769,6 @@ def list_executions(
 
 
 # ============================================================================
-# Internal: PySpark execution
-# ============================================================================
-# ============================================================================
-# Safe exec() sandbox
-# ============================================================================
-
-_SAFE_BUILTINS = {
-    # Allowed builtins for transformation code — no file I/O, no eval/exec,
-    # no import manipulation, no process control.
-    k: v for k, v in __builtins__.items()  # type: ignore[union-attr]
-    if k not in {
-        'eval', 'exec', 'compile', '__import__', 'open',
-        'breakpoint', 'exit', 'quit', 'input',
-        'globals', 'locals', 'vars', 'dir',
-        'getattr', 'setattr', 'delattr',
-        'memoryview', 'classmethod', 'staticmethod',
-    }
-} if isinstance(__builtins__, dict) else {
-    k: getattr(__builtins__, k)
-    for k in dir(__builtins__)
-    if not k.startswith('_') and k not in {
-        'eval', 'exec', 'compile', '__import__', 'open',
-        'breakpoint', 'exit', 'quit', 'input',
-        'globals', 'locals', 'vars', 'dir',
-        'getattr', 'setattr', 'delattr',
-        'memoryview', 'classmethod', 'staticmethod',
-    }
-}
-
-
-def _safe_import(name, *args, **kwargs):
-    """Only allow importing data-processing libraries."""
-    ALLOWED_MODULES = {
-        'pyspark', 'pyspark.sql', 'pyspark.sql.functions',
-        'pyspark.sql.types', 'pyspark.sql.window',
-        'math', 'datetime', 'decimal', 'json', 're',
-        'collections', 'functools', 'itertools', 'operator',
-        'typing', 'string', 'hashlib', 'uuid',
-    }
-    top_level = name.split('.')[0]
-    if top_level not in {m.split('.')[0] for m in ALLOWED_MODULES} and name not in ALLOWED_MODULES:
-        raise ImportError(f"Import of '{name}' is not allowed in transformation code.")
-    return __builtins__['__import__'](name, *args, **kwargs) if isinstance(__builtins__, dict) \
-        else __import__(name, *args, **kwargs)
-
-
-def _build_safe_exec_globals() -> dict:
-    """Build a restricted globals dict for exec() to sandbox user/AI code."""
-    safe = {'__builtins__': {**_SAFE_BUILTINS, '__import__': _safe_import}}
-    return safe
-
-
-
-# ============================================================================
-# Safe exec() sandbox
-# ============================================================================
-
-_SAFE_BUILTINS = {
-    # Allowed builtins for transformation code — no file I/O, no eval/exec,
-    # no import manipulation, no process control.
-    k: v for k, v in __builtins__.items()  # type: ignore[union-attr]
-    if k not in {
-        'eval', 'exec', 'compile', '__import__', 'open',
-        'breakpoint', 'exit', 'quit', 'input',
-        'globals', 'locals', 'vars', 'dir',
-        'getattr', 'setattr', 'delattr',
-        'memoryview', 'classmethod', 'staticmethod',
-    }
-} if isinstance(__builtins__, dict) else {
-    k: getattr(__builtins__, k)
-    for k in dir(__builtins__)
-    if not k.startswith('_') and k not in {
-        'eval', 'exec', 'compile', '__import__', 'open',
-        'breakpoint', 'exit', 'quit', 'input',
-        'globals', 'locals', 'vars', 'dir',
-        'getattr', 'setattr', 'delattr',
-        'memoryview', 'classmethod', 'staticmethod',
-    }
-}
-
-
-def _safe_import(name, *args, **kwargs):
-    """Only allow importing data-processing libraries."""
-    ALLOWED_MODULES = {
-        'pyspark', 'pyspark.sql', 'pyspark.sql.functions',
-        'pyspark.sql.types', 'pyspark.sql.window',
-        'math', 'datetime', 'decimal', 'json', 're',
-        'collections', 'functools', 'itertools', 'operator',
-        'typing', 'string', 'hashlib', 'uuid',
-    }
-    top_level = name.split('.')[0]
-    if top_level not in {m.split('.')[0] for m in ALLOWED_MODULES} and name not in ALLOWED_MODULES:
-        raise ImportError(f"Import of '{name}' is not allowed in transformation code.")
-    return __builtins__['__import__'](name, *args, **kwargs) if isinstance(__builtins__, dict) \
-        else __import__(name, *args, **kwargs)
-
-
-def _build_safe_exec_globals() -> dict:
-    """Build a restricted globals dict for exec() to sandbox user/AI code."""
-    safe = {'__builtins__': {**_SAFE_BUILTINS, '__import__': _safe_import}}
-    return safe
-
-
-
-
-def _execute_dry_run(code: str, input_schema: list, sample_rows: list) -> dict:
-    """Execute transform code on sample data using PySpark."""
-    from pyspark.sql import SparkSession
-    from pyspark.sql.types import StructType, StructField, StringType, IntegerType, FloatType, BooleanType, LongType
-
-    TYPE_MAP = {
-        "string": StringType(), "integer": IntegerType(), "long": LongType(),
-        "float": FloatType(), "double": FloatType(), "boolean": BooleanType(),
-    }
-
-    spark = None
-    try:
-        # Stop any existing session to avoid config bleed
-        try:
-            existing = SparkSession.getActiveSession()
-            if existing:
-                existing.stop()
-        except Exception:
-            pass
-        spark = (
-            SparkSession.builder
-            .master("local[1]")
-            .appName("dry_run")
-            .config("spark.driver.memory", "512m")
-            .config("spark.sql.shuffle.partitions", "2")
-            .config("spark.ui.enabled", "false")
-            .getOrCreate()
-        )
-
-        fields = []
-        for f in input_schema:
-            name = f.get("name", "col")
-            dtype = f.get("detected_type", f.get("type", "string")).lower()
-            spark_type = TYPE_MAP.get(dtype, StringType())
-            nullable = f.get("nullable", True)
-            fields.append(StructField(name, spark_type, nullable))
-        schema = StructType(fields) if fields else None
-
-        if sample_rows:
-            rows = sample_rows[:10]
-            df = spark.createDataFrame(rows, schema=schema) if schema else spark.createDataFrame(rows)
-        elif schema:
-            df = spark.createDataFrame([], schema=schema)
-        else:
-            return {"success": False, "output_rows": [], "output_schema": [], "row_count": 0,
-                    "error": "No sample data and no schema.", "validation_message": "Cannot create test DataFrame."}
-
-        exec_globals = _build_safe_exec_globals()
-        exec(code, exec_globals)
-        transform_fn = exec_globals.get("transform")
-        if not transform_fn:
-            return {"success": False, "output_rows": [], "output_schema": [], "row_count": 0,
-                    "error": "`transform` function not found.", "validation_message": "Code must define `def transform(df, spark):`"}
-
-        result_df = transform_fn(df, spark)
-        output_rows = [row.asDict() for row in result_df.collect()]
-        output_schema = [{"name": f.name, "type": str(f.dataType), "nullable": f.nullable} for f in result_df.schema.fields]
-
-        return {"success": True, "output_rows": output_rows, "output_schema": output_schema,
-                "row_count": len(output_rows), "error": None,
-                "validation_message": f"Dry-run successful: {len(output_rows)} rows, {len(output_schema)} columns."}
-
-    except Exception as e:
-        return {"success": False, "output_rows": [], "output_schema": [], "row_count": 0,
-                "error": str(e), "validation_message": f"Dry-run failed: {str(e)}"}
-    finally:
-        if spark:
-            spark.stop()
-
-
-def _execute_silver_upload(pipeline, transforms: list, db: Session) -> dict:
-    """
-    Read bronze data from MinIO, apply all transformations sequentially,
-    write result to silver bucket.
-    """
-    import os
-    from pyspark.sql import SparkSession
-
-    minio_endpoint = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
-    minio_access = os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin")
-    minio_secret = os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin")
-
-    import re as _re
-    silver_bucket = "silver"
-    pipeline_slug = _re.sub(r"[^a-z0-9]+", "_", pipeline.name.lower()).strip("_")
-    silver_path = f"s3a://{silver_bucket}/{pipeline_slug}/silver/"
-
-    # Bronze path will be read from the latest ingestion record (set below)
-    bronze_path = None
-
-    spark = None
-    try:
-        # Stop any existing session to avoid config bleed
-        try:
-            existing = SparkSession.getActiveSession()
-            if existing:
-                existing.stop()
-        except Exception:
-            pass
-        spark = (
-            SparkSession.builder
-            .master("local[*]")
-            .appName(f"silver_upload_{pipeline_slug}")
-            .config("spark.driver.memory", "1g")
-            .config("spark.sql.shuffle.partitions", "4")
-            .config("spark.ui.enabled", "false")
-            .config("spark.hadoop.fs.s3a.endpoint", minio_endpoint)
-            .config("spark.hadoop.fs.s3a.access.key", minio_access)
-            .config("spark.hadoop.fs.s3a.secret.key", minio_secret)
-            .config("spark.hadoop.fs.s3a.path.style.access", "true")
-            .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-            .getOrCreate()
-        )
-
-        # Ensure silver bucket exists
-        import boto3
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=minio_endpoint,
-            aws_access_key_id=minio_access,
-            aws_secret_access_key=minio_secret,
-        )
-        try:
-            s3.head_bucket(Bucket=silver_bucket)
-        except Exception:
-            s3.create_bucket(Bucket=silver_bucket)
-
-        # ---------- locate the latest bronze version path ----------
-        latest_ingestion = (
-            db.query(BronzeIngestion)
-            .filter(BronzeIngestion.pipeline_id == pipeline.id)
-            .order_by(BronzeIngestion.created_at.desc())
-            .first()
-        )
-        if latest_ingestion and latest_ingestion.bronze_path:
-            bronze_path = latest_ingestion.bronze_path
-
-        if not bronze_path:
-            raise ValueError('No Bronze ingestion found. Run Bronze ingestion first.')
-
-        # ---------- read bronze CSV data ----------
-        df = (spark.read
-              .option("header", "true")
-              .option("inferSchema", "true")
-              .csv(bronze_path))
-
-        input_count = df.count()
-
-        # Save the combined pipeline code to disk for reference
-        try:
-            save_silver_upload_pipeline(
-                project_name=pipeline.name,
-                transforms=[
-                    {"name": t.name, "code": t.confirmed_code, "version": t.version}
-                    for t in transforms
-                ],
-                bronze_path=bronze_path,
-                silver_path=silver_path,
-            )
-        except Exception as save_err:
-            logger.warning("Could not save upload pipeline code to disk: %s", save_err)
-
-        # Apply each transformation in order — track per-transform results
-        transform_results = []
-        for t in transforms:
-            t_start = time.time()
-            try:
-                exec_globals = _build_safe_exec_globals()
-                exec(t.confirmed_code, exec_globals)
-                transform_fn = exec_globals.get("transform")
-                if not transform_fn:
-                    raise ValueError(f"Transform '{t.name}' (v{t.version}) has no `transform` function")
-                df = transform_fn(df, spark)
-                transform_results.append({
-                    "id": str(t.id),
-                    "name": t.name,
-                    "version": t.version,
-                    "status": "success",
-                    "duration_seconds": round(time.time() - t_start, 2),
-                })
-            except Exception as te:
-                transform_results.append({
-                    "id": str(t.id),
-                    "name": t.name,
-                    "version": t.version,
-                    "status": "failed",
-                    "error": str(te),
-                    "duration_seconds": round(time.time() - t_start, 2),
-                })
-                raise ValueError(
-                    f"Transform '{t.name}' (v{t.version}) failed: {str(te)}"
-                ) from te
-
-        output_count = df.count()
-
-        # Write to silver bucket as CSV
-        df.write.mode("overwrite").option("header", "true").csv(silver_path)
-
-        return {
-            "input_path": bronze_path,
-            "output_path": silver_path,
-            "input_records": input_count,
-            "output_records": output_count,
-            "transform_results": transform_results,
-        }
-
-    finally:
-        if spark:
-            spark.stop()
-
-
-# ============================================================================
 # Silver Data Preview
 # ============================================================================
 
@@ -1121,9 +779,6 @@ def preview_silver_data(
     db: Session = Depends(get_db),
 ):
     """Preview sample rows from the latest Silver execution output."""
-    from pyspark.sql import SparkSession
-    import os
-
     execution = (
         db.query(SilverExecution)
         .filter(SilverExecution.pipeline_id == project_id, SilverExecution.status == "completed")
@@ -1137,55 +792,12 @@ def preview_silver_data(
     if not silver_path:
         raise HTTPException(404, "Silver output path not available")
 
-    minio_endpoint = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
-    minio_access = os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin")
-    minio_secret = os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin")
-
-    spark = None
     try:
-        # Stop any existing session to avoid config bleed
-        try:
-            existing = SparkSession.getActiveSession()
-            if existing:
-                existing.stop()
-        except Exception:
-            pass
-        spark = (
-            SparkSession.builder
-            .master("local[1]")
-            .appName("silver_preview")
-            .config("spark.driver.memory", "512m")
-            .config("spark.ui.enabled", "false")
-            .config("spark.hadoop.fs.s3a.endpoint", minio_endpoint)
-            .config("spark.hadoop.fs.s3a.access.key", minio_access)
-            .config("spark.hadoop.fs.s3a.secret.key", minio_secret)
-            .config("spark.hadoop.fs.s3a.path.style.access", "true")
-            .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-            .getOrCreate()
-        )
-
-        df = spark.read.option("header", "true").option("inferSchema", "true").csv(silver_path)
-        total_count = df.count()
-        schema_info = [{"name": f.name, "type": str(f.dataType), "nullable": f.nullable} for f in df.schema.fields]
-        sample_rows = [row.asDict() for row in df.limit(limit).collect()]
-
-        for row in sample_rows:
-            for k, v in row.items():
-                if v is not None and not isinstance(v, (str, int, float, bool)):
-                    row[k] = str(v)
-
-        return {
-            "total_records": total_count,
-            "columns": schema_info,
-            "rows": sample_rows,
-            "silver_path": silver_path,
-            "preview_count": len(sample_rows),
-        }
+        result = preview_data_from_path(silver_path, limit=limit)
+        result["silver_path"] = silver_path
+        return result
     except Exception as e:
         raise HTTPException(500, f"Failed to preview Silver data: {str(e)}")
-    finally:
-        if spark:
-            spark.stop()
 
 
 # ============================================================================
@@ -1207,7 +819,6 @@ def rollback_version(
     if target.is_active and target.status != "archived":
         raise HTTPException(400, "This version is already active.")
 
-    # Archive the currently active version at same task_order
     current_active = (
         db.query(SilverTransformation)
         .filter(
@@ -1222,7 +833,6 @@ def rollback_version(
         current_active.is_active = False
         current_active.status = "archived"
 
-    # Reactivate the target
     target.is_active = True
     target.status = "confirmed" if target.confirmed_code else "draft"
     db.commit()

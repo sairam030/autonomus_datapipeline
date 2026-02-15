@@ -152,6 +152,7 @@ with DAG(
     catchup=False,
     tags={tags},
     max_active_runs=1,
+    is_paused_upon_creation=False,
 ) as dag:
 
     t_buckets = PythonOperator(task_id="create_buckets", python_callable=create_buckets)
@@ -304,6 +305,7 @@ with DAG(
     catchup=False,
     tags={tags},
     max_active_runs=1,
+    is_paused_upon_creation=False,
 ) as dag:
 
     t_buckets = PythonOperator(task_id="create_buckets", python_callable=create_buckets)
@@ -320,6 +322,12 @@ Auto-generated Bronze Ingestion DAG — Kafka Source
 Project : {project_name}
 Source   : Kafka topic ({kafka_topic})
 Generated: {generated_at}
+
+Offset management:
+  - Uses Kafka consumer group offset tracking (group_id based).
+  - Each DAG run consumes all NEW messages since the last committed offset.
+  - Offsets are committed ONLY after successful write to MinIO.
+  - If the DAG was down, the next run picks up all missed messages.
 """
 
 from datetime import datetime, timedelta
@@ -352,83 +360,129 @@ def create_buckets(**ctx):
 
 
 def consume_kafka(**ctx):
-    """Consume messages from Kafka and write to MinIO Bronze layer."""
+    """
+    Consume all new messages from Kafka since the last committed offset.
+    Uses consumer group offset management — Kafka tracks where we left off.
+    Offsets are committed only after data is successfully written to MinIO.
+    """
     import pandas as pd
     from io import BytesIO
-    from kafka import KafkaConsumer
+    from kafka import KafkaConsumer, TopicPartition
 
     kafka_config = {kafka_config}
     pipeline_id = "{pipeline_id}"
 
     bootstrap = kafka_config["bootstrap_servers"]
     topic = kafka_config["topic"]
-    group_id = kafka_config.get("group_id", f"bronze_{{pipeline_id}}")
-    max_messages = kafka_config.get("max_messages", 10000)
-    timeout_ms = kafka_config.get("consumer_timeout_ms", 30000)
-    value_deserializer = kafka_config.get("deserializer", "json")
+    group_id = kafka_config.get("group_id") or f"bronze_{{pipeline_id}}"
+    max_messages = kafka_config.get("max_messages", 50000)
+    poll_timeout_ms = kafka_config.get("consumer_timeout_ms", 30000)
 
     logger.info("Consuming from Kafka: %s topic=%s group=%s", bootstrap, topic, group_id)
-
-    if value_deserializer == "json":
-        deser = lambda v: json.loads(v.decode("utf-8"))
-    else:
-        deser = lambda v: {{"value": v.decode("utf-8", errors="replace")}}
 
     consumer = KafkaConsumer(
         topic,
         bootstrap_servers=bootstrap.split(","),
         group_id=group_id,
         auto_offset_reset=kafka_config.get("auto_offset_reset", "earliest"),
-        enable_auto_commit=True,
-        consumer_timeout_ms=timeout_ms,
-        value_deserializer=deser,
+        enable_auto_commit=False,          # Manual commit after successful write
+        consumer_timeout_ms=poll_timeout_ms,
+        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+        max_poll_records=500,
     )
 
     records = []
-    for msg in consumer:
-        record = msg.value if isinstance(msg.value, dict) else {{"value": msg.value}}
-        record["_kafka_topic"] = msg.topic
-        record["_kafka_partition"] = msg.partition
-        record["_kafka_offset"] = msg.offset
-        record["_kafka_timestamp"] = msg.timestamp
-        records.append(record)
-        if len(records) >= max_messages:
-            break
+    offsets_to_commit = {{}}
 
-    consumer.close()
+    try:
+        for msg in consumer:
+            # Deserialize
+            record = msg.value if isinstance(msg.value, dict) else {{"value": msg.value}}
+            # Add Kafka metadata columns
+            record["_kafka_topic"] = msg.topic
+            record["_kafka_partition"] = msg.partition
+            record["_kafka_offset"] = msg.offset
+            record["_kafka_timestamp"] = msg.timestamp
+            record["_kafka_ingested_at"] = datetime.utcnow().isoformat()
+            records.append(record)
+
+            # Track the latest offset per partition for manual commit
+            tp = TopicPartition(msg.topic, msg.partition)
+            from kafka import OffsetAndMetadata
+            offsets_to_commit[tp] = OffsetAndMetadata(msg.offset + 1, None)
+
+            if len(records) >= max_messages:
+                logger.info("Reached max_messages limit (%d)", max_messages)
+                break
+    except StopIteration:
+        pass
+
     logger.info("Consumed %d messages from topic %s", len(records), topic)
 
     if not records:
-        logger.warning("No messages consumed")
+        logger.info("No new messages to process — topic is up to date")
         ctx["ti"].xcom_push(key="record_count", value=0)
+        ctx["ti"].xcom_push(key="status", value="no_new_data")
+        consumer.close()
         return
 
+    # Convert to DataFrame
     df = pd.DataFrame(records)
 
-    # Write to MinIO
+    # Write to MinIO as Parquet — use the same stable path the DB expects
     from minio import Minio
     minio_ep = os.environ.get("MINIO_ENDPOINT", "http://minio:9000").replace("http://", "").replace("https://", "")
     client = Minio(minio_ep, access_key=os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin"),
                    secret_key=os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin"), secure=False)
 
+    # bronze_base_path aligns with what the backend DB stores
+    # e.g. "kafka_test/v1/data"  →  s3a://bronze/kafka_test/v1/data/
+    base_path = kafka_config.get("bronze_base_path", f"{{pipeline_id}}/kafka")
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    object_name = f"{{pipeline_id}}/{{ts}}/data.csv"
+    object_name = f"{{base_path}}/part_{{ts}}.parquet"
 
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    client.put_object("bronze", object_name, BytesIO(csv_bytes), len(csv_bytes), content_type="text/csv")
+    parquet_buffer = BytesIO()
+    df.to_parquet(parquet_buffer, index=False, engine="pyarrow")
+    parquet_bytes = parquet_buffer.getvalue()
+    client.put_object("bronze", object_name, BytesIO(parquet_bytes), len(parquet_bytes),
+                      content_type="application/octet-stream")
 
-    bronze_path = f"s3a://bronze/{{object_name}}"
+    bronze_path = f"s3a://bronze/{{base_path}}"
+    logger.info("Written %d records to %s", len(df), bronze_path)
+
+    # Commit offsets ONLY after successful write
+    consumer.commit(offsets_to_commit)
+    logger.info("Committed offsets for %d partitions", len(offsets_to_commit))
+
+    consumer.close()
+    # Notify the backend that data has been written
+    try:
+        import requests as _req
+        backend_url = os.environ.get("BACKEND_URL", "http://backend:8000")
+        _req.post(
+            f"{{backend_url}}/api/bronze/{{pipeline_id}}/ingestion-complete",
+            params={{"total_records": len(df), "bronze_path": bronze_path}},
+            timeout=10,
+        )
+        logger.info("Notified backend of ingestion completion")
+    except Exception as cb_err:
+        logger.warning("Could not notify backend: %s (non-fatal)", cb_err)
     ctx["ti"].xcom_push(key="bronze_path", value=bronze_path)
     ctx["ti"].xcom_push(key="record_count", value=len(df))
-    logger.info("✅ Kafka Bronze ingestion complete: %d records → %s", len(df), bronze_path)
+    ctx["ti"].xcom_push(key="status", value="success")
+    logger.info("\\u2705 Kafka Bronze ingestion complete: %d records \\u2192 %s", len(df), bronze_path)
 
 
 def log_summary(**ctx):
     ti = ctx["ti"]
     path = ti.xcom_pull(task_ids="consume_kafka", key="bronze_path")
     count = ti.xcom_pull(task_ids="consume_kafka", key="record_count")
+    status = ti.xcom_pull(task_ids="consume_kafka", key="status")
     logger.info("=" * 60)
-    logger.info("  Kafka Bronze Summary — %s records → %s", count, path)
+    logger.info("  Kafka Bronze Summary")
+    logger.info("  Status  : %s", status)
+    logger.info("  Records : %s", count)
+    logger.info("  Path    : %s", path)
     logger.info("=" * 60)
 
 
@@ -441,6 +495,7 @@ with DAG(
     catchup=False,
     tags={tags},
     max_active_runs=1,
+    is_paused_upon_creation=False,
 ) as dag:
 
     t_buckets = PythonOperator(task_id="create_buckets", python_callable=create_buckets)
@@ -448,6 +503,244 @@ with DAG(
     t_summary = PythonOperator(task_id="log_summary", python_callable=log_summary)
 
     t_buckets >> t_consume >> t_summary
+'''
+
+
+# ============================================================================
+# SILVER DAG TEMPLATE
+# ============================================================================
+
+_SILVER_DAG_TEMPLATE = '''\
+"""
+Auto-generated Silver Transformation DAG
+Project : {project_name}
+Generated: {generated_at}
+
+Reads Bronze data, applies all confirmed Silver transformations via
+the backend API, and writes results to the Silver bucket.
+"""
+
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+import os, json, logging, requests
+
+logger = logging.getLogger(__name__)
+
+default_args = {{
+    "owner": "{owner}",
+    "depends_on_past": False,
+    "retries": {retries},
+    "retry_delay": timedelta(minutes={retry_delay_min}),
+    "execution_timeout": timedelta(hours=2),
+}}
+
+
+def run_silver_upload(**ctx):
+    """Call the backend API to apply Silver transformations."""
+    backend_url = os.environ.get("BACKEND_URL", "http://backend:8000")
+    pipeline_id = "{pipeline_id}"
+
+    url = f"{{backend_url}}/api/silver/{{pipeline_id}}/upload-to-silver"
+    logger.info("Triggering Silver upload: %s", url)
+
+    resp = requests.post(url, json={{}}, timeout=7200)
+    if resp.status_code != 200:
+        error_detail = resp.text
+        logger.error("Silver upload failed (HTTP %d): %s", resp.status_code, error_detail)
+        raise RuntimeError(f"Silver upload failed: {{error_detail}}")
+
+    result = resp.json()
+
+    if not result.get("success"):
+        raise RuntimeError(f"Silver upload error: {{result.get('error', 'unknown')}}")
+
+    logger.info(
+        "\\u2705 Silver upload complete: %d → %d records, path=%s",
+        result.get("input_records", 0),
+        result.get("output_records", 0),
+        result.get("output_path", ""),
+    )
+
+    ctx["ti"].xcom_push(key="input_records", value=result.get("input_records", 0))
+    ctx["ti"].xcom_push(key="output_records", value=result.get("output_records", 0))
+    ctx["ti"].xcom_push(key="output_path", value=result.get("output_path", ""))
+    ctx["ti"].xcom_push(key="status", value="success")
+
+
+def log_summary(**ctx):
+    ti = ctx["ti"]
+    inp = ti.xcom_pull(task_ids="run_silver_upload", key="input_records")
+    out = ti.xcom_pull(task_ids="run_silver_upload", key="output_records")
+    path = ti.xcom_pull(task_ids="run_silver_upload", key="output_path")
+    logger.info("=" * 60)
+    logger.info("  Silver Transformation Summary")
+    logger.info("  Input records  : %s", inp)
+    logger.info("  Output records : %s", out)
+    logger.info("  Output path    : %s", path)
+    logger.info("=" * 60)
+
+
+with DAG(
+    dag_id="{dag_id}",
+    default_args=default_args,
+    description="Silver transformations — {project_name}",
+    schedule_interval={schedule},
+    start_date=datetime({start_year}, {start_month}, {start_day}),
+    catchup=False,
+    tags={tags},
+    max_active_runs=1,
+    is_paused_upon_creation=False,
+) as dag:
+
+    t_silver  = PythonOperator(task_id="run_silver_upload", python_callable=run_silver_upload)
+    t_summary = PythonOperator(task_id="log_summary", python_callable=log_summary)
+
+    t_silver >> t_summary
+'''
+
+
+# ============================================================================
+# GOLD DAG TEMPLATE
+# ============================================================================
+
+_GOLD_DAG_TEMPLATE = '''\
+"""
+Auto-generated Gold Transformation DAG
+Project : {project_name}
+Generated: {generated_at}
+
+Reads Silver data, applies all confirmed Gold transformations via
+the backend API, and writes results to the Gold bucket.
+{postgres_doc_line}
+"""
+
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+import os, json, logging, requests
+
+logger = logging.getLogger(__name__)
+
+default_args = {{
+    "owner": "{owner}",
+    "depends_on_past": False,
+    "retries": {retries},
+    "retry_delay": timedelta(minutes={retry_delay_min}),
+    "execution_timeout": timedelta(hours=2),
+}}
+
+# Push to Postgres configuration
+PUSH_TO_POSTGRES = {push_to_postgres}
+POSTGRES_TABLE   = "{postgres_table_name}"
+POSTGRES_MODE    = "{postgres_if_exists}"
+
+
+def run_gold_upload(**ctx):
+    """Call the backend API to apply Gold transformations."""
+    backend_url = os.environ.get("BACKEND_URL", "http://backend:8000")
+    pipeline_id = "{pipeline_id}"
+
+    url = f"{{backend_url}}/api/gold/{{pipeline_id}}/upload-to-gold"
+    logger.info("Triggering Gold upload: %s", url)
+
+    resp = requests.post(url, json={{}}, timeout=7200)
+    if resp.status_code != 200:
+        error_detail = resp.text
+        logger.error("Gold upload failed (HTTP %d): %s", resp.status_code, error_detail)
+        raise RuntimeError(f"Gold upload failed: {{error_detail}}")
+
+    result = resp.json()
+
+    if not result.get("success"):
+        raise RuntimeError(f"Gold upload error: {{result.get('error', 'unknown')}}")
+
+    logger.info(
+        "\\u2705 Gold upload complete: %d \u2192 %d records, path=%s",
+        result.get("input_records", 0),
+        result.get("output_records", 0),
+        result.get("output_path", ""),
+    )
+
+    ctx["ti"].xcom_push(key="input_records", value=result.get("input_records", 0))
+    ctx["ti"].xcom_push(key="output_records", value=result.get("output_records", 0))
+    ctx["ti"].xcom_push(key="output_path", value=result.get("output_path", ""))
+    ctx["ti"].xcom_push(key="status", value="success")
+
+
+def push_to_postgres(**ctx):
+    """Push Gold data to a Postgres table via the backend API."""
+    if not PUSH_TO_POSTGRES:
+        logger.info("Push to Postgres is disabled — skipping.")
+        return
+
+    backend_url = os.environ.get("BACKEND_URL", "http://backend:8000")
+    pipeline_id = "{pipeline_id}"
+
+    url = f"{{backend_url}}/api/gold/{{pipeline_id}}/push-to-postgres"
+    payload = {{
+        "table_name": POSTGRES_TABLE,
+        "if_exists": POSTGRES_MODE,
+    }}
+    logger.info("Pushing Gold data to Postgres table '%s': %s", POSTGRES_TABLE, url)
+
+    resp = requests.post(url, json=payload, timeout=7200)
+    if resp.status_code != 200:
+        error_detail = resp.text
+        logger.error("Push to Postgres failed (HTTP %d): %s", resp.status_code, error_detail)
+        raise RuntimeError(f"Push to Postgres failed: {{error_detail}}")
+
+    result = resp.json()
+
+    if not result.get("success"):
+        raise RuntimeError(f"Push to Postgres error: {{result.get('error', 'unknown')}}")
+
+    logger.info(
+        "\\u2705 Pushed %d records to Postgres table '%s' (%.1fs)",
+        result.get("records_pushed", 0),
+        result.get("table_name", POSTGRES_TABLE),
+        result.get("duration_seconds", 0),
+    )
+
+    ctx["ti"].xcom_push(key="records_pushed", value=result.get("records_pushed", 0))
+    ctx["ti"].xcom_push(key="postgres_table", value=result.get("table_name", POSTGRES_TABLE))
+
+
+def log_summary(**ctx):
+    ti = ctx["ti"]
+    inp = ti.xcom_pull(task_ids="run_gold_upload", key="input_records")
+    out = ti.xcom_pull(task_ids="run_gold_upload", key="output_records")
+    path = ti.xcom_pull(task_ids="run_gold_upload", key="output_path")
+    pg_records = ti.xcom_pull(task_ids="push_to_postgres", key="records_pushed")
+    pg_table   = ti.xcom_pull(task_ids="push_to_postgres", key="postgres_table")
+    logger.info("=" * 60)
+    logger.info("  Gold Transformation Summary")
+    logger.info("  Input records  : %s", inp)
+    logger.info("  Output records : %s", out)
+    logger.info("  Output path    : %s", path)
+    if PUSH_TO_POSTGRES and pg_records:
+        logger.info("  Postgres table : %s", pg_table)
+        logger.info("  Records pushed : %s", pg_records)
+    logger.info("=" * 60)
+
+
+with DAG(
+    dag_id="{dag_id}",
+    default_args=default_args,
+    description="Gold transformations — {project_name}",
+    schedule_interval={schedule},
+    start_date=datetime({start_year}, {start_month}, {start_day}),
+    catchup=False,
+    tags={tags},
+    max_active_runs=1,
+    is_paused_upon_creation=False,
+) as dag:
+
+    t_gold     = PythonOperator(task_id="run_gold_upload", python_callable=run_gold_upload)
+    t_postgres = PythonOperator(task_id="push_to_postgres", python_callable=push_to_postgres)
+    t_summary  = PythonOperator(task_id="log_summary", python_callable=log_summary)
+
+    t_gold >> t_postgres >> t_summary
 '''
 
 
@@ -496,6 +789,7 @@ with DAG(
     catchup=False,
     tags={tags},
     max_active_runs=1,
+    is_paused_upon_creation=False,
 ) as dag:
 
     t_start = PythonOperator(task_id="start_pipeline", python_callable=start_pipeline)
@@ -599,6 +893,132 @@ class DAGGenerator:
             "dag_id": dag_id,
             "dag_type": "bronze",
             "source_type": source_type,
+            "filename": filename,
+            "filepath": filepath,
+            "schedule": schedule,
+        }
+
+    # ------------------------------------------------------------------
+    # Silver DAG
+    # ------------------------------------------------------------------
+    def generate_silver_dag(
+        self,
+        project_name: str,
+        project_id: str,
+        schedule: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        retries: int = 1,
+        retry_delay_min: int = 5,
+        owner: str = "autonomous-pipeline",
+    ) -> dict:
+        """Generate a Silver DAG that calls the backend upload-to-silver API."""
+
+        dag_base = _safe_dag_name(project_name, project_id)
+        dag_id = f"silver_{dag_base}"
+        start = start_date or datetime(2024, 1, 1)
+        schedule_str = f'"{schedule}"' if schedule else "None"
+        tags_str = str(["auto-generated", "silver", project_name[:30]])
+        generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        dag_code = _SILVER_DAG_TEMPLATE.format(
+            project_name=project_name,
+            pipeline_id=str(project_id),
+            dag_id=dag_id,
+            owner=owner,
+            retries=retries,
+            retry_delay_min=retry_delay_min,
+            schedule=schedule_str,
+            start_year=start.year,
+            start_month=start.month,
+            start_day=start.day,
+            tags=tags_str,
+            generated_at=generated_at,
+        )
+
+        filename = f"{dag_id}.py"
+        filepath = os.path.join(self.dags_dir, filename)
+        with open(filepath, "w") as f:
+            f.write(dag_code)
+
+        logger.info("Generated Silver DAG: %s → %s", dag_id, filepath)
+
+        try:
+            save_dag_code(project_name, "silver", dag_id, dag_code)
+        except Exception:
+            pass
+
+        return {
+            "dag_id": dag_id,
+            "dag_type": "silver",
+            "filename": filename,
+            "filepath": filepath,
+            "schedule": schedule,
+        }
+
+    # ------------------------------------------------------------------
+    # Gold DAG
+    # ------------------------------------------------------------------
+    def generate_gold_dag(
+        self,
+        project_name: str,
+        project_id: str,
+        schedule: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        retries: int = 1,
+        retry_delay_min: int = 5,
+        owner: str = "autonomous-pipeline",
+        push_to_postgres: bool = False,
+        postgres_table_name: str = "",
+        postgres_if_exists: str = "replace",
+    ) -> dict:
+        """Generate a Gold DAG that calls the backend upload-to-gold API."""
+
+        dag_base = _safe_dag_name(project_name, project_id)
+        dag_id = f"gold_{dag_base}"
+        start = start_date or datetime(2024, 1, 1)
+        schedule_str = f'"{schedule}"' if schedule else "None"
+        tags_str = str(["auto-generated", "gold", project_name[:30]])
+        generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        postgres_doc_line = (
+            f"Also pushes results to Postgres table '{postgres_table_name}'."
+            if push_to_postgres else ""
+        )
+
+        dag_code = _GOLD_DAG_TEMPLATE.format(
+            project_name=project_name,
+            pipeline_id=str(project_id),
+            dag_id=dag_id,
+            owner=owner,
+            retries=retries,
+            retry_delay_min=retry_delay_min,
+            schedule=schedule_str,
+            start_year=start.year,
+            start_month=start.month,
+            start_day=start.day,
+            tags=tags_str,
+            generated_at=generated_at,
+            push_to_postgres=push_to_postgres,
+            postgres_table_name=postgres_table_name or "",
+            postgres_if_exists=postgres_if_exists or "replace",
+            postgres_doc_line=postgres_doc_line,
+        )
+
+        filename = f"{dag_id}.py"
+        filepath = os.path.join(self.dags_dir, filename)
+        with open(filepath, "w") as f:
+            f.write(dag_code)
+
+        logger.info("Generated Gold DAG: %s → %s", dag_id, filepath)
+
+        try:
+            save_dag_code(project_name, "gold", dag_id, dag_code)
+        except Exception:
+            pass
+
+        return {
+            "dag_id": dag_id,
+            "dag_type": "gold",
             "filename": filename,
             "filepath": filepath,
             "schedule": schedule,

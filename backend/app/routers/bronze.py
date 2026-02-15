@@ -94,6 +94,43 @@ def _get_preview_spark():
     return _spark_preview
 
 
+@router.post("/{pipeline_id}/ingestion-complete")
+def mark_ingestion_complete(
+    pipeline_id: UUID,
+    db: Session = Depends(get_db),
+    total_records: int = 0,
+    bronze_path: str = "",
+):
+    """
+    Called by the Airflow Kafka/API Bronze DAG after successfully writing data.
+    Updates the BronzeIngestion record from 'pending' to 'success'.
+    """
+    from datetime import datetime, timezone
+
+    ingestion = (
+        db.query(BronzeIngestion)
+        .filter(BronzeIngestion.pipeline_id == pipeline_id)
+        .order_by(BronzeIngestion.created_at.desc())
+        .first()
+    )
+    if not ingestion:
+        raise HTTPException(404, "No Bronze ingestion record found")
+
+    ingestion.status = "success"
+    ingestion.total_records = (ingestion.total_records or 0) + total_records
+    ingestion.files_ingested = (ingestion.files_ingested or 0) + 1
+    ingestion.completed_at = datetime.now(timezone.utc)
+    if bronze_path:
+        ingestion.bronze_path = bronze_path
+    db.commit()
+
+    logger.info(
+        "Bronze ingestion marked complete for pipeline %s: %d records",
+        pipeline_id, total_records,
+    )
+    return {"status": "success", "total_records": ingestion.total_records}
+
+
 @router.get("/{pipeline_id}/preview")
 def preview_bronze_data(
     pipeline_id: UUID,
@@ -116,7 +153,11 @@ def preview_bronze_data(
 
     try:
         spark = _get_preview_spark()
-        df = spark.read.option("header", "true").option("inferSchema", "true").csv(bronze_path)
+        # Auto-detect format: try Parquet first, fall back to CSV
+        try:
+            df = spark.read.parquet(bronze_path)
+        except Exception:
+            df = spark.read.option("header", "true").option("inferSchema", "true").csv(bronze_path)
         schema_info = [{"name": f.name, "type": str(f.dataType), "nullable": f.nullable} for f in df.schema.fields]
         sample_rows = [row.asDict() for row in df.limit(limit).collect()]
 

@@ -24,7 +24,7 @@ from backend.app.schemas.schema import (
     SchemaDetectionResult, SchemaConfirmRequest, SchemaConfirmResponse,
     SchemaRegistryResponse,
 )
-from backend.app.services.schema_detection import scan_and_detect_schema, fetch_and_detect_api_schema
+from backend.app.services.schema_detection import scan_and_detect_schema, fetch_and_detect_api_schema, fetch_and_detect_kafka_schema
 from backend.app.services.ingestion.bronze_ingestion import ingest_to_bronze
 from backend.app.services.code_saver import save_bronze_ingestion
 
@@ -51,8 +51,8 @@ def detect_schema(pipeline_id: UUID, db: Session = Depends(get_db)):
     if not data_source:
         raise HTTPException(400, "No data source configured. Configure source first via POST /api/pipelines/{id}/source")
 
-    if data_source.source_type not in ("csv", "json", "parquet", "api"):
-        raise HTTPException(400, f"Schema detection for '{data_source.source_type}' not yet supported. Use csv, json, parquet, or api.")
+    if data_source.source_type not in ("csv", "json", "parquet", "api", "kafka"):
+        raise HTTPException(400, f"Schema detection for '{data_source.source_type}' not yet supported. Use csv, json, parquet, api, or kafka.")
 
     # Get current max schema version for this pipeline
     max_version = (
@@ -65,7 +65,20 @@ def detect_schema(pipeline_id: UUID, db: Session = Depends(get_db)):
 
     # Run schema detection — branch by source type
     try:
-        if data_source.source_type == "api":
+        if data_source.source_type == "kafka":
+            # Kafka source: consume sample messages and detect schema
+            if not data_source.kafka_bootstrap or not data_source.kafka_topic:
+                raise HTTPException(400, "kafka_bootstrap and kafka_topic must be configured")
+
+            kafka_extra = data_source.kafka_config or {}
+            result = fetch_and_detect_kafka_schema(
+                kafka_bootstrap=data_source.kafka_bootstrap,
+                kafka_topic=data_source.kafka_topic,
+                kafka_group_id=data_source.kafka_group_id,
+                kafka_config=kafka_extra,
+                pipeline_id=pipeline_id,
+            )
+        elif data_source.source_type == "api":
             # API source: fetch from endpoint and detect schema from response
             if not data_source.api_endpoint:
                 raise HTTPException(400, "api_endpoint not configured in data source")
@@ -332,7 +345,7 @@ def confirm_schema(
         pipeline_id=payload.pipeline_id,
         schema_version=schema_record.version,
         bronze_path=bronze_path,
-        status="running" if data_source.source_type not in ("api", "kafka") else "success",
+        status="running" if data_source.source_type not in ("api", "kafka") else "pending",
     )
     db.add(ingestion)
     db.commit()
@@ -340,14 +353,10 @@ def confirm_schema(
 
     if data_source.source_type in ("api", "kafka"):
         # For API / Kafka sources, Bronze ingestion is handled by the
-        # generated Airflow DAG, not by a local Spark job.  Just mark
-        # the pipeline as bronze_ready so users can proceed to DAG creation.
+        # generated Airflow DAG, not by a local Spark job.  Mark as
+        # 'pending' — the DAG will call back to update status to
+        # 'success' after actually writing data to MinIO.
         pipeline.status = "bronze_ready"
-        ingestion.total_records = 0
-        ingestion.files_ingested = 0
-        ingestion.files_skipped = 0
-        ingestion.duration_seconds = 0.0
-        ingestion.completed_at = datetime.now(timezone.utc)
         db.commit()
 
         logger.info(
@@ -365,7 +374,7 @@ def confirm_schema(
             message=(
                 f"Schema confirmed. For {data_source.source_type} sources, "
                 f"Bronze ingestion will be handled by the generated Airflow DAG. "
-                f"Proceed to create a DAG."
+                f"Run the Bronze DAG first, then proceed to Silver."
             ),
         )
 

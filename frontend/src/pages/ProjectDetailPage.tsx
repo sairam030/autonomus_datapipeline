@@ -6,7 +6,7 @@ import {
   Avatar, Paper, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, FormControl, InputLabel, Select, MenuItem,
   List, ListItem, ListItemText, ListItemSecondaryAction,
-  Tabs, Tab,
+  Tabs, Tab, Switch, FormControlLabel,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -113,6 +113,11 @@ export default function ProjectDetailPage() {
   const [dagGenerating, setDagGenerating] = useState(false);
   const [dagResultInfo, setDagResultInfo] = useState<DAGInfo | null>(null);
   const [dagError, setDagError] = useState<string | null>(null);
+
+  // Gold — Push to Postgres options
+  const [pushToPostgres, setPushToPostgres] = useState(false);
+  const [postgresTableName, setPostgresTableName] = useState('');
+  const [postgresIfExists, setPostgresIfExists] = useState('replace');
 
   // Delete project dialog
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -335,6 +340,11 @@ export default function ProjectDetailPage() {
       retries: dagRetries,
       retry_delay_min: dagRetryDelay,
       owner: dagOwner,
+      ...(taskType === 'gold' && pushToPostgres ? {
+        push_to_postgres: true,
+        postgres_table_name: postgresTableName.trim(),
+        postgres_if_exists: postgresIfExists,
+      } : {}),
     };
 
     try {
@@ -801,6 +811,55 @@ export default function ProjectDetailPage() {
                     Creates a single <strong>{taskType}</strong> DAG for this project.
                     You can create multiple task DAGs, then chain them with a Master DAG.
                   </Alert>
+
+                  {/* Push to Postgres option — only for Gold */}
+                  {taskType === 'gold' && (
+                    <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={pushToPostgres}
+                            onChange={e => setPushToPostgres(e.target.checked)}
+                            color="primary"
+                          />
+                        }
+                        label={
+                          <Box>
+                            <Typography variant="subtitle2">Push to Postgres</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              After Gold upload, automatically push results to a Postgres table
+                            </Typography>
+                          </Box>
+                        }
+                      />
+                      {pushToPostgres && (
+                        <Box sx={{ mt: 2, display: 'flex', gap: 2 }}>
+                          <TextField
+                            size="small"
+                            label="Table Name"
+                            placeholder="e.g. gold_flights"
+                            value={postgresTableName}
+                            onChange={e => setPostgresTableName(e.target.value)}
+                            sx={{ flex: 2 }}
+                            required
+                            helperText="Postgres table name to write Gold data into"
+                          />
+                          <FormControl size="small" sx={{ flex: 1 }}>
+                            <InputLabel>If Exists</InputLabel>
+                            <Select
+                              value={postgresIfExists}
+                              label="If Exists"
+                              onChange={e => setPostgresIfExists(e.target.value)}
+                            >
+                              <MenuItem value="replace">Replace</MenuItem>
+                              <MenuItem value="append">Append</MenuItem>
+                              <MenuItem value="fail">Fail</MenuItem>
+                            </Select>
+                          </FormControl>
+                        </Box>
+                      )}
+                    </Paper>
+                  )}
                 </Box>
               )}
 

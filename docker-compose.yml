@@ -13,7 +13,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://pipeline:pipeline123@postgres/autonomous_pipeline
     AIRFLOW__CORE__FERNET_KEY: 'UKMzEm3yIuFYEq1y3-2FxPNWSVwRASpahmQ9kQfEr8E='
-    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
     AIRFLOW__WEBSERVER__SESSION_BACKEND: "securecookie"
@@ -27,6 +27,12 @@ x-airflow-common: &airflow-common
     MINIO_ENDPOINT: http://minio:9000
     DATABASE_URL: postgresql+psycopg2://pipeline:pipeline123@postgres:5432/autonomous_pipeline
     REDIS_URL: redis://redis:6379/0
+    BACKEND_URL: http://backend:8000
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    POSTGRES_USER: pipeline
+    POSTGRES_PASSWORD: pipeline123
+    POSTGRES_DB: autonomous_pipeline
     PYTHONPATH: /opt/airflow:/opt/pipeline:/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip
     PYTHONUNBUFFERED: "1"
   volumes:
@@ -128,6 +134,77 @@ services:
     restart: unless-stopped
 
   # ===========================================================================
+  # KAFKA CLUSTER
+  # ===========================================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: ap-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    networks:
+      - pipeline-net
+    healthcheck:
+      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: ap-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - pipeline-net
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # Create default test topic on startup
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: ap-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Waiting for Kafka to be ready...' &&
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic flight-data --partitions 3 --replication-factor 1 &&
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic test-topic --partitions 1 --replication-factor 1 &&
+      echo '✅ Kafka topics created' &&
+      kafka-topics --bootstrap-server kafka:9092 --list
+      "
+    networks:
+      - pipeline-net
+
+  # ===========================================================================
   # SPARK CLUSTER (same pattern as aviation project)
   # ===========================================================================
   spark-master:
@@ -221,6 +298,12 @@ services:
       REDIS_URL: redis://redis:6379/0
       DATA_MOUNT_PATH: /data/pipeline
       DAGS_OUTPUT_DIR: /opt/airflow/dags
+      BACKEND_URL: http://backend:8000
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline123
+      POSTGRES_DB: autonomous_pipeline
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     ports:
       - "8000:8000"
@@ -333,6 +416,8 @@ volumes:
   spark-logs:
   pipeline-data:
   frontend-node-modules:
+  kafka-data:
+  zookeeper-data:
 
 networks:
   pipeline-net:
@@ -351,4 +436,7 @@ networks:
 # Airflow UI:       8085  (aviation: 8080)
 # React Frontend:   3001  (aviation: N/A)
 # Redis:            6380  (aviation: N/A)
+# Kafka Broker:     9093  (external listener)
+# Kafka Internal:   9092  (container-to-container)
+# Zookeeper:        2181
 # =============================================================================

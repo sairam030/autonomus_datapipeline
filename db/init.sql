@@ -104,7 +104,7 @@ CREATE TABLE bronze_ingestions (
     total_size_bytes BIGINT DEFAULT 0,
     duration_seconds FLOAT DEFAULT 0,
     -- Status
-    status          VARCHAR(50) DEFAULT 'running' CHECK (status IN ('running', 'success', 'failed', 'partial')),
+    status          VARCHAR(50) DEFAULT 'running' CHECK (status IN ('running', 'success', 'failed', 'partial', 'pending')),
     error_message   TEXT,
     started_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     completed_at    TIMESTAMP WITH TIME ZONE,
