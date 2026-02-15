@@ -357,7 +357,7 @@ CREATE TABLE alert_configurations (
 CREATE TABLE silver_transformations (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
-    name            VARCHAR(255) NOT NULL UNIQUE,
+    name            VARCHAR(255) NOT NULL,
     description     TEXT,
     -- AI-generated PySpark code
     generated_code  TEXT,
@@ -369,12 +369,15 @@ CREATE TABLE silver_transformations (
     sample_output   JSONB DEFAULT '[]'::jsonb,        -- Dry-run output rows
     -- Status tracking
     status          VARCHAR(50) DEFAULT 'draft' CHECK (status IN (
-        'draft', 'chatting', 'code_generated', 'code_reviewed', 'dry_run_passed', 'confirmed', 'error'
+        'draft', 'chatting', 'code_generated', 'code_reviewed', 'dry_run_passed', 'confirmed', 'archived', 'error'
     )),
     -- Conversation tracking
     conversation_count INTEGER DEFAULT 0,
     -- Ordering within project
     task_order      INTEGER DEFAULT 1,
+    -- Versioning
+    version         INTEGER DEFAULT 1,
+    is_active       BOOLEAN DEFAULT TRUE,
     -- Timestamps
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -406,6 +409,29 @@ CREATE TABLE conversation_messages (
 
 CREATE INDEX idx_conversation_messages_transformation ON conversation_messages(transformation_id);
 CREATE INDEX idx_conversation_messages_order ON conversation_messages(transformation_id, message_order);
+
+
+-- =============================================================================
+-- 16b. SILVER EXECUTIONS - Track Silver layer execution runs
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS silver_executions (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+    transformation_ids JSONB DEFAULT '[]'::jsonb,
+    status          VARCHAR(50) DEFAULT 'running',
+    input_path      TEXT,
+    output_path     TEXT,
+    input_records   BIGINT DEFAULT 0,
+    output_records  BIGINT DEFAULT 0,
+    duration_seconds FLOAT DEFAULT 0,
+    error_message   TEXT,
+    started_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    completed_at    TIMESTAMP WITH TIME ZONE,
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_silver_executions_pipeline ON silver_executions(pipeline_id);
+CREATE INDEX IF NOT EXISTS idx_silver_executions_status ON silver_executions(status);
 
 
 -- =============================================================================
