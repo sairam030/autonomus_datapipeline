@@ -13,6 +13,7 @@
     <img src="https://img.shields.io/badge/Apache_Airflow-017CEE?style=for-the-badge&logo=apacheairflow&logoColor=white" alt="Airflow"/>
     <img src="https://img.shields.io/badge/MinIO-C72E49?style=for-the-badge&logo=minio&logoColor=white" alt="MinIO"/>
     <img src="https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL"/>
+    <img src="https://img.shields.io/badge/Apache_Kafka-231F20?style=for-the-badge&logo=apachekafka&logoColor=white" alt="Kafka"/>
     <img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker"/>
     <img src="https://img.shields.io/badge/Gemini_AI-8E75B2?style=for-the-badge&logo=googlegemini&logoColor=white" alt="Gemini AI"/>
   </p>
@@ -57,13 +58,15 @@ Users interact through a **React-based dark-themed UI** to upload data files, au
 │   │   (React +   │  API   │  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  │  │
 │   │   MUI + TS)  │        │  │ Routers  │  │  Services    │  │  Models      │  │  │
 │   │              │        │  │          │  │              │  │  (SQLAlchemy) │  │  │
-│   │  • Projects  │        │  │ /upload  │  │ schema_det.  │  │              │  │  │
-│   │  • Schema    │        │  │ /schemas │  │ ai_service   │  │ pipelines    │  │  │
-│   │    Preview   │        │  │ /bronze  │  │ dag_gen.     │  │ schemas      │  │  │
-│   │  • Silver    │        │  │ /silver  │  │ minio_svc.   │  │ bronze_ing.  │  │  │
-│   │    Enrichment│        │  │ /gold    │  │ code_saver   │  │ transforms   │  │  │
-│   │  • Gold      │        │  │ /dags    │  │              │  │ audit_log    │  │  │
-│   │    Enrichment│        │  │ /pipes   │  └──────┬───────┘  └──────────────┘  │  │
+│   │  • Projects  │        │  │ /upload  │  │ ai_service   │  │              │  │  │
+│   │  • Schema    │        │  │ /schemas │  │ dag_gen.     │  │ pipelines    │  │  │
+│   │    Preview   │        │  │ /bronze  │  │ minio_svc.   │  │ schemas      │  │  │
+│   │  • Silver    │        │  │ /silver  │  │ spark_utils  │  │ bronze_ing.  │  │  │
+│   │    Enrichment│        │  │ /gold    │  │ sandbox      │  │ transforms   │  │  │
+│   │  • Gold      │        │  │ /dags    │  │ silver_svc.  │  │ audit_log    │  │  │
+│   │    Enrichment│        │  │ /pipes   │  │ gold_svc.    │  │              │  │  │
+│   │  • DAG Mgmt  │        │  │          │  │ kafka_prod.  │  │              │  │  │
+│   │              │        │  └──────────┘  └──────┬───────┘  └──────────────┘  │  │
 │   │  • DAG Mgmt  │        │  └──────────┘         │                             │  │
 │   └──────────────┘        └───────────────────────┼─────────────────────────────┘  │
 │        :3001                      :8000            │                                 │
@@ -108,7 +111,9 @@ Users interact through a **React-based dark-themed UI** to upload data files, au
 ### Data Flow
 
 ```
-  📁 Upload Files (CSV/JSON/Parquet)
+  📁 Upload Files (CSV/JSON/Parquet) ─────┐
+  🌐 REST API Sources ───────────────────┤
+  📡 Apache Kafka Streams ───────────────┘
         │
         ▼
   🔍 Auto Schema Detection (pandas + heuristic inference)
@@ -193,10 +198,17 @@ Users interact through a **React-based dark-themed UI** to upload data files, au
 |---|---|---|
 | **Google Gemini API** | gemini-2.5-flash | AI-powered PySpark code generation for Silver & Gold transformations |
 
+### Streaming
+| Technology | Version | Purpose |
+|---|---|---|
+| **Apache Kafka** | 7.6.0 (CP) | Real-time data streaming |
+| **Zookeeper** | 7.6.0 (CP) | Kafka cluster coordination |
+| **kafka-python-ng** | 2.2.3 | Python Kafka consumer/producer |
+
 ### Infrastructure
 | Technology | Purpose |
 |---|---|
-| **Docker & Docker Compose** | Containerized deployment |
+| **Docker & Docker Compose** | Containerized deployment (13 services) |
 | **Hadoop AWS (3.3.4)** | S3A filesystem connector for Spark |
 | **PostgreSQL JDBC** | Spark ↔ PostgreSQL connector |
 
@@ -215,8 +227,11 @@ Users interact through a **React-based dark-themed UI** to upload data files, au
 - ✅ **PostgreSQL Export** — Push Gold-layer data to PostgreSQL tables (append/replace/fail modes)
 - ✅ **Full Audit Trail** — Every generated code file is timestamped and saved to `generated_queries/`
 - ✅ **Multi-Source Support** — CSV, JSON, Parquet, REST API, Kafka, and Database sources
+- ✅ **Kafka Streaming** — Real-time data ingestion from Kafka topics with configurable consumer groups
+- ✅ **Push to PostgreSQL** — Gold-layer data exported to PostgreSQL tables for BI/dashboards
 - ✅ **Spark Cluster** — Dedicated Spark Master + Worker for distributed processing
 - ✅ **Dark-Themed UI** — Modern React + MUI dark theme with project-based navigation
+- ✅ **Modular Service Layer** — Clean separation of routers (HTTP) from services (business logic)
 
 ---
 
@@ -224,54 +239,60 @@ Users interact through a **React-based dark-themed UI** to upload data files, au
 
 ```
 autonomous_pipeline/
-├── backend/                    # FastAPI backend application
+├── backend/                        # FastAPI backend application
 │   └── app/
-│       ├── main.py             # Application entry point & CORS config
-│       ├── config.py           # Pydantic settings (env-based config)
-│       ├── database.py         # SQLAlchemy session management
+│       ├── main.py                 # Application entry point & CORS config
+│       ├── config.py               # Pydantic settings (env-based config)
+│       ├── database.py             # SQLAlchemy session management
 │       ├── models/
-│       │   └── models.py       # SQLAlchemy ORM models (17+ tables)
-│       ├── routers/
-│       │   ├── pipelines.py    # Project CRUD + data source config
-│       │   ├── schemas.py      # Schema detection & Bronze ingestion trigger
-│       │   ├── bronze.py       # Bronze ingestion status & Spark preview
-│       │   ├── silver.py       # AI-driven Silver transformations
-│       │   ├── gold.py         # AI-driven Gold transformations + PG push
-│       │   ├── upload.py       # File upload management
-│       │   └── dags.py         # Airflow DAG generation & management
-│       ├── schemas/            # Pydantic request/response schemas
-│       └── services/
+│       │   └── models.py           # SQLAlchemy ORM models (20 tables)
+│       ├── routers/                # Thin HTTP layer — request handling only
+│       │   ├── pipelines.py        # Project CRUD + Kafka connectivity
+│       │   ├── schemas.py          # Schema detection & Bronze ingestion
+│       │   ├── bronze.py           # Bronze ingestion status & callbacks
+│       │   ├── silver.py           # Silver transformation endpoints
+│       │   ├── gold.py             # Gold transformation + PG push endpoints
+│       │   ├── upload.py           # File upload management
+│       │   └── dags.py             # Airflow DAG generation & management
+│       ├── schemas/                # Pydantic request/response schemas
+│       └── services/               # Business logic layer
 │           ├── ai_service.py       # Gemini AI integration
+│           ├── sandbox.py          # Safe exec() for user/AI code (sandboxed)
+│           ├── spark_utils.py      # Shared Spark session builders & MinIO I/O
+│           ├── silver_service.py   # Silver upload execution engine
+│           ├── gold_service.py     # Gold upload + push-to-Postgres engine
 │           ├── schema_detection.py # Type inference & schema analysis
-│           ├── dag_generator.py    # Template-based DAG rendering
+│           ├── dag_generator.py    # Template-based DAG rendering (6 templates)
 │           ├── minio_service.py    # MinIO client utilities
 │           └── code_saver.py       # Generated code persistence
-├── frontend/                   # React TypeScript frontend
+├── frontend/                       # React TypeScript frontend
 │   └── src/
-│       ├── App.tsx             # Routes & dark theme config
+│       ├── App.tsx                 # Routes & dark theme config
 │       ├── components/
-│       │   └── Layout.tsx      # Sidebar + AppBar layout
+│       │   └── Layout.tsx          # Sidebar + AppBar layout
 │       ├── pages/
 │       │   ├── ProjectsPage.tsx        # Project listing
-│       │   ├── CreateProjectPage.tsx    # New project wizard
-│       │   ├── ProjectDetailPage.tsx    # Project dashboard
-│       │   ├── CreateTaskPage.tsx       # Task creation
-│       │   ├── SchemaPreviewPage.tsx    # Schema review & confirm
+│       │   ├── CreateProjectPage.tsx   # New project wizard
+│       │   ├── ProjectDetailPage.tsx   # Project dashboard + push-to-PG
+│       │   ├── CreateTaskPage.tsx      # DAG task creation
+│       │   ├── SchemaPreviewPage.tsx   # Schema review & confirm
 │       │   ├── SilverEnrichmentPage.tsx # AI chat + code editor
-│       │   └── GoldEnrichmentPage.tsx   # AI chat + code editor
+│       │   └── GoldEnrichmentPage.tsx  # AI chat + code editor
 │       └── services/
-│           └── api.ts          # Axios API client
-├── dags/                       # Auto-generated Airflow DAGs
-├── data/                       # Sample / reference data files
+│           └── api.ts              # Axios API client
+├── dags/                           # Auto-generated Airflow DAGs (gitignored)
+├── data/                           # Sample / reference data files
 ├── db/
-│   └── init.sql                # PostgreSQL schema (17+ tables)
-├── engine/                     # Execution engine modules
-├── generated_queries/          # Audit trail of all generated code
-├── logs/                       # Airflow task logs
+│   └── init.sql                    # PostgreSQL schema (20 tables)
+├── engine/                         # Execution engine modules
+├── generated_queries/              # Audit trail of all generated code
+├── logs/                           # Airflow task logs (gitignored)
 ├── scripts/
-│   └── spark_master_entrypoint.sh
-├── docker-compose.yml          # Full stack orchestration (10 services)
-├── Dockerfile                  # Custom Airflow + Spark + Python image
+│   ├── spark_master_entrypoint.sh
+│   └── kafka_producer.py           # Test Kafka producer script
+├── docker-compose.yml              # Full stack orchestration (13 services)
+├── Dockerfile                      # Custom Airflow + Spark + Python image
+├── .env.example                    # Template for environment variables
 └── README.md
 ```
 
@@ -298,24 +319,23 @@ cd autonomous_pipeline
 
 ### 2. Set Environment Variables
 
-Create a `.env` file in the project root:
+Copy the example env file and fill in your Gemini API key:
 
 ```bash
-# Required for AI-powered transformations
-GEMINI_API_KEY=your_gemini_api_key_here
-
-# Optional: Override Airflow UID (default: 1000)
-AIRFLOW_UID=1000
+cp .env.example .env
+# Edit .env and set your GEMINI_API_KEY
 ```
+
+The `.env.example` includes all configurable ports, credentials, and the Gemini API key placeholder.
 
 ### 3. Build and Start All Services
 
 ```bash
-# Build the custom Docker image and start all 10 services
+# Build the custom Docker image and start all 13 services
 docker compose up -d --build
 ```
 
-> ⏳ **First run takes ~5–10 minutes** to build the image, download Spark/Hadoop JARs, initialize the database, and install frontend dependencies.
+> ⏳ **First run takes ~5–10 minutes** to build the image, download Spark/Hadoop JARs, initialize the database, create Kafka topics, and install frontend dependencies.
 
 ### 4. Verify Services Are Running
 
@@ -330,6 +350,8 @@ NAME                  STATUS
 ap-postgres           healthy
 ap-minio              healthy
 ap-redis              healthy
+ap-zookeeper          healthy
+ap-kafka              healthy
 ap-spark-master       healthy
 ap-spark-worker-1     running
 ap-backend            running
@@ -375,6 +397,9 @@ docker compose down -v
 | Spark Worker UI | `8091` | `8081` | Web UI |
 | FastAPI Backend | `8000` | `8000` | REST API |
 | Airflow UI | `8085` | `8080` | Web UI |
+| Kafka (External) | `9093` | `9093` | External listener |
+| Kafka (Internal) | — | `9092` | Container-to-container |
+| Zookeeper | `2181` | `2181` | Kafka coordination |
 | React Frontend | `3001` | `3000` | Dev server |
 
 ---
@@ -439,14 +464,24 @@ Auto-generate Bronze, Silver, Gold, and Master DAGs. Enable them in the Airflow 
 |---|---|---|
 | `POST` | `/api/gold/{id}/transformations` | Create transformation |
 | `POST` | `/api/gold/{id}/transformations/{tid}/chat` | AI chat |
+| `POST` | `/api/gold/{id}/refresh-schema` | Refresh schema from Silver |
 | `POST` | `/api/gold/{id}/upload-to-gold` | Execute pipeline |
 | `POST` | `/api/gold/{id}/push-to-postgres` | Export to PostgreSQL |
+| `GET` | `/api/gold/{id}/preview` | Preview Gold data |
+| `GET` | `/api/gold/{id}/postgres-pushes` | Push history |
+
+### Kafka & Data Sources
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/pipelines/kafka/test-connection` | Test Kafka connectivity |
+| `POST` | `/api/pipelines/kafka/topics` | List available Kafka topics |
 
 ### DAGs
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/api/dags/{id}/generate` | Generate all DAGs |
 | `GET` | `/api/dags/{id}` | List generated DAGs |
+| `DELETE` | `/api/dags/{id}/{dag_id}` | Delete a DAG file |
 
 > 📖 Full interactive API docs available at **[http://localhost:8000/docs](http://localhost:8000/docs)**
 
@@ -464,6 +499,12 @@ Auto-generate Bronze, Silver, Gold, and Master DAGs. Enable them in the Airflow 
 | `AWS_SECRET_ACCESS_KEY` | `minioadmin` | MinIO secret key |
 | `SPARK_MASTER_URL` | `local[*]` | Spark master URL |
 | `REDIS_URL` | `redis://redis:6379/0` | Redis connection |
+| `BACKEND_URL` | `http://backend:8000` | Backend URL (used by Airflow DAGs) |
+| `POSTGRES_HOST` | `postgres` | PostgreSQL host for Gold push |
+| `POSTGRES_PORT` | `5432` | PostgreSQL port for Gold push |
+| `POSTGRES_USER` | `pipeline` | PostgreSQL user for Gold push |
+| `POSTGRES_PASSWORD` | `pipeline123` | PostgreSQL password for Gold push |
+| `POSTGRES_DB` | `autonomous_pipeline` | PostgreSQL database for Gold push |
 | `AIRFLOW_UID` | `1000` | Airflow user ID |
 
 ---
