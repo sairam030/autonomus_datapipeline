@@ -205,7 +205,6 @@ services:
     container_name: ap-backend
     command: >
       bash -c "
-      mkdir -p /data/pipeline && chmod 777 /data/pipeline &&
       cd /opt/pipeline &&
       python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
       "

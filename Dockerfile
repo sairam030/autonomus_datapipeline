@@ -51,6 +51,10 @@ RUN mkdir -p /opt/airflow/dags /opt/airflow/logs /opt/airflow/plugins && \
     chown -R airflow:root /opt/airflow && \
     chmod -R 777 /opt/airflow
 
+# Create data directory with open permissions (used for file uploads / pipeline data)
+RUN mkdir -p /data/pipeline && \
+    chmod 777 /data/pipeline
+
 USER airflow
 
 # Install Python packages (same proven set as aviation project + autonomous pipeline extras)
