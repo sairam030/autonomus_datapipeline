@@ -474,6 +474,3 @@ This project is for educational and development purposes.
 
 ---
 
-<p align="center">
-  Built with ❤️ using FastAPI, React, Spark, Airflow, MinIO & Gemini AI
-</p>
