@@ -168,7 +168,7 @@ export default function ProjectDetailPage() {
         let bronzeDesc = 'Upload data files and ingest to Bronze layer';
         const bronzeDetails: Record<string, any> = {};
 
-        if (['schema_detected', 'schema_confirmed', 'bronze_ready', 'silver_configured', 'active'].includes(p.status)) {
+        if (['schema_detected', 'schema_confirmed', 'bronze_ready', 'silver_configured', 'gold_configured', 'gold_ready', 'active'].includes(p.status)) {
           try {
             const versions = await schemaApi.listVersions(projectId);
             if (versions.length > 0) {
@@ -179,7 +179,7 @@ export default function ProjectDetailPage() {
           } catch { /* ignore */ }
         }
 
-        if (p.status === 'bronze_ready' || p.status === 'silver_configured' || p.status === 'active') {
+        if (p.status === 'bronze_ready' || p.status === 'silver_configured' || p.status === 'gold_configured' || p.status === 'gold_ready' || p.status === 'active') {
           bronzeStatus = 'completed';
           bronzeDesc = 'Data ingested to Bronze layer';
           try {
@@ -211,7 +211,7 @@ export default function ProjectDetailPage() {
         });
 
         // Silver task
-        const silverStatus: Task['status'] = p.status === 'silver_configured' || p.status === 'active'
+        const silverStatus: Task['status'] = p.status === 'silver_configured' || p.status === 'gold_configured' || p.status === 'gold_ready' || p.status === 'active'
           ? 'completed' : 'not_started';
         derivedTasks.push({
           id: 'silver', type: 'silver', label: 'Silver Transformation',

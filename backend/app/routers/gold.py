@@ -48,6 +48,7 @@ class TransformationResponse(BaseModel):
     generated_code: Optional[str]
     confirmed_code: Optional[str]
     input_schema: list
+    output_schema: list = []
     sample_input: list
     sample_output: list
     conversation_count: int
@@ -132,6 +133,56 @@ class PushToPostgresResponse(BaseModel):
 # Helpers
 # ============================================================================
 
+# ============================================================================
+# Safe exec() sandbox
+# ============================================================================
+
+_SAFE_BUILTINS = {
+    # Allowed builtins for transformation code — no file I/O, no eval/exec,
+    # no import manipulation, no process control.
+    k: v for k, v in __builtins__.items()  # type: ignore[union-attr]
+    if k not in {
+        'eval', 'exec', 'compile', '__import__', 'open',
+        'breakpoint', 'exit', 'quit', 'input',
+        'globals', 'locals', 'vars', 'dir',
+        'getattr', 'setattr', 'delattr',
+        'memoryview', 'classmethod', 'staticmethod',
+    }
+} if isinstance(__builtins__, dict) else {
+    k: getattr(__builtins__, k)
+    for k in dir(__builtins__)
+    if not k.startswith('_') and k not in {
+        'eval', 'exec', 'compile', '__import__', 'open',
+        'breakpoint', 'exit', 'quit', 'input',
+        'globals', 'locals', 'vars', 'dir',
+        'getattr', 'setattr', 'delattr',
+        'memoryview', 'classmethod', 'staticmethod',
+    }
+}
+
+
+def _safe_import(name, *args, **kwargs):
+    """Only allow importing data-processing libraries."""
+    ALLOWED_MODULES = {
+        'pyspark', 'pyspark.sql', 'pyspark.sql.functions',
+        'pyspark.sql.types', 'pyspark.sql.window',
+        'math', 'datetime', 'decimal', 'json', 're',
+        'collections', 'functools', 'itertools', 'operator',
+        'typing', 'string', 'hashlib', 'uuid',
+    }
+    top_level = name.split('.')[0]
+    if top_level not in {m.split('.')[0] for m in ALLOWED_MODULES} and name not in ALLOWED_MODULES:
+        raise ImportError(f"Import of '{name}' is not allowed in transformation code.")
+    return __builtins__['__import__'](name, *args, **kwargs) if isinstance(__builtins__, dict) \
+        else __import__(name, *args, **kwargs)
+
+
+def _build_safe_exec_globals() -> dict:
+    """Build a restricted globals dict for exec() to sandbox user/AI code."""
+    safe = {'__builtins__': {**_SAFE_BUILTINS, '__import__': _safe_import}}
+    return safe
+
+
 def _build_sample_rows_from_schema(input_schema: list, num_rows: int = 10) -> list:
     """Synthesize sample rows from schema's sample_values."""
     if not input_schema:
@@ -191,6 +242,7 @@ def _to_response(t: GoldTransformation) -> TransformationResponse:
         generated_code=t.generated_code,
         confirmed_code=t.confirmed_code,
         input_schema=t.input_schema or [],
+        output_schema=t.output_schema or [],
         sample_input=t.sample_input or [],
         sample_output=t.sample_output or [],
         conversation_count=t.conversation_count or 0,
@@ -223,6 +275,13 @@ def _get_silver_schema_and_samples(db: Session, project_id: UUID) -> tuple:
         minio_secret = os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin")
         spark = None
         try:
+            # Stop any existing session to avoid config bleed
+            try:
+                existing = SparkSession.getActiveSession()
+                if existing:
+                    existing.stop()
+            except Exception:
+                pass
             spark = (
                 SparkSession.builder
                 .master("local[1]")
@@ -998,6 +1057,13 @@ def preview_gold_data(
 
     spark = None
     try:
+        # Stop any existing session to avoid config bleed
+        try:
+            existing = SparkSession.getActiveSession()
+            if existing:
+                existing.stop()
+        except Exception:
+            pass
         spark = (
             SparkSession.builder
             .master("local[1]")
@@ -1015,12 +1081,29 @@ def preview_gold_data(
         df = spark.read.option("header", "true").option("inferSchema", "true").csv(gold_path)
         total_count = df.count()
         schema_info = [{"name": f.name, "type": str(f.dataType), "nullable": f.nullable} for f in df.schema.fields]
-        sample_rows = [row.asDict() for row in df.limit(limit).collect()]
 
-        for row in sample_rows:
-            for k, v in row.items():
-                if v is not None and not isinstance(v, (str, int, float, bool)):
-                    row[k] = str(v)
+        import datetime as _dt
+        from decimal import Decimal as _Decimal
+
+        def _json_safe(val):
+            if val is None:
+                return None
+            if isinstance(val, (_dt.datetime, _dt.date)):
+                return val.isoformat()
+            if isinstance(val, _dt.time):
+                return val.isoformat()
+            if isinstance(val, _Decimal):
+                return float(val)
+            if isinstance(val, bytes):
+                return val.decode("utf-8", errors="replace")
+            if not isinstance(val, (str, int, float, bool)):
+                return str(val)
+            return val
+
+        sample_rows = [
+            {k: _json_safe(v) for k, v in row.asDict().items()}
+            for row in df.limit(limit).collect()
+        ]
 
         return {
             "total_records": total_count,
@@ -1090,6 +1173,13 @@ def _execute_dry_run(code: str, input_schema: list, sample_rows: list) -> dict:
 
     spark = None
     try:
+        # Stop any existing session to avoid config bleed
+        try:
+            existing = SparkSession.getActiveSession()
+            if existing:
+                existing.stop()
+        except Exception:
+            pass
         spark = (
             SparkSession.builder
             .master("local[1]")
@@ -1118,7 +1208,7 @@ def _execute_dry_run(code: str, input_schema: list, sample_rows: list) -> dict:
             return {"success": False, "output_rows": [], "output_schema": [], "row_count": 0,
                     "error": "No sample data and no schema.", "validation_message": "Cannot create test DataFrame."}
 
-        exec_globals = {}
+        exec_globals = _build_safe_exec_globals()
         exec(code, exec_globals)
         transform_fn = exec_globals.get("transform")
         if not transform_fn:
@@ -1171,6 +1261,13 @@ def _execute_gold_upload(pipeline, transforms: list, db: Session) -> dict:
 
     spark = None
     try:
+        # Stop any existing session to avoid config bleed
+        try:
+            existing = SparkSession.getActiveSession()
+            if existing:
+                existing.stop()
+        except Exception:
+            pass
         spark = (
             SparkSession.builder
             .master("local[*]")
@@ -1226,7 +1323,7 @@ def _execute_gold_upload(pipeline, transforms: list, db: Session) -> dict:
         for t in transforms:
             t_start = time.time()
             try:
-                exec_globals = {}
+                exec_globals = _build_safe_exec_globals()
                 exec(t.confirmed_code, exec_globals)
                 transform_fn = exec_globals.get("transform")
                 if not transform_fn:
@@ -1279,6 +1376,23 @@ def _table_exists(cursor, table_name: str) -> bool:
     return cursor.fetchone()[0]
 
 
+def _sanitize_table_name(name: str) -> str:
+    """Validate and sanitize a table name to prevent SQL injection."""
+    import re
+    # Strip whitespace and quotes
+    clean = name.strip().strip('"')
+    # Only allow alphanumeric, underscores, and dots (for schema.table)
+    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_.]*$', clean):
+        raise ValueError(
+            f"Invalid table name '{name}'. Only letters, digits, underscores, "
+            f"and dots are allowed, and it must start with a letter or underscore."
+        )
+    # Reject overly long names (Postgres limit is 63)
+    if len(clean) > 63:
+        raise ValueError(f"Table name too long ({len(clean)} chars). Max is 63.")
+    return clean
+
+
 def _execute_push_to_postgres(gold_path: str, table_name: str, if_exists: str = "replace") -> int:
     """
     Read Gold data from MinIO and push it to a PostgreSQL table.
@@ -1286,6 +1400,9 @@ def _execute_push_to_postgres(gold_path: str, table_name: str, if_exists: str = 
     """
     import os
     from pyspark.sql import SparkSession
+
+    # Sanitize table name to prevent SQL injection
+    table_name = _sanitize_table_name(table_name)
 
     minio_endpoint = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
     minio_access = os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin")
@@ -1300,6 +1417,13 @@ def _execute_push_to_postgres(gold_path: str, table_name: str, if_exists: str = 
 
     spark = None
     try:
+        # Stop any existing session to avoid config bleed
+        try:
+            existing = SparkSession.getActiveSession()
+            if existing:
+                existing.stop()
+        except Exception:
+            pass
         spark = (
             SparkSession.builder
             .master("local[*]")

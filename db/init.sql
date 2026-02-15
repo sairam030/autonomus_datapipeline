@@ -461,15 +461,16 @@ CREATE INDEX IF NOT EXISTS idx_gold_conversation_messages_order ON gold_conversa
 CREATE TABLE IF NOT EXISTS gold_executions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
-    status          VARCHAR(50) DEFAULT 'pending',
-    transformations_applied JSONB,
+    status          VARCHAR(50) DEFAULT 'running',
+    transformation_ids JSONB DEFAULT '[]'::jsonb,
     input_path      TEXT,
     output_path     TEXT,
-    records_in      INTEGER,
-    records_out     INTEGER,
+    input_records   BIGINT DEFAULT 0,
+    output_records  BIGINT DEFAULT 0,
     error_message   TEXT,
-    execution_time_seconds FLOAT,
+    duration_seconds FLOAT DEFAULT 0,
     started_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     completed_at    TIMESTAMP WITH TIME ZONE
 );
 
@@ -484,11 +485,11 @@ CREATE TABLE IF NOT EXISTS postgres_pushes (
     pipeline_id         UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
     gold_execution_id   UUID REFERENCES gold_executions(id) ON DELETE SET NULL,
     table_name          VARCHAR(255) NOT NULL,
-    status              VARCHAR(50) DEFAULT 'pending',
-    records_pushed      INTEGER,
-    if_exists_mode      VARCHAR(20) DEFAULT 'replace',
+    status              VARCHAR(50) DEFAULT 'running',
+    records_pushed      BIGINT DEFAULT 0,
     error_message       TEXT,
-    started_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    duration_seconds    FLOAT DEFAULT 0,
+    created_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     completed_at        TIMESTAMP WITH TIME ZONE
 );
 
