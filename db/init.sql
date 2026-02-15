@@ -12,10 +12,10 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- =============================================================================
 CREATE TABLE pipelines (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name            VARCHAR(255) NOT NULL,
+    name            VARCHAR(255) NOT NULL UNIQUE,
     description     TEXT,
     source_type     VARCHAR(50) NOT NULL CHECK (source_type IN ('csv', 'json', 'parquet', 'api', 'kafka', 'database')),
-    status          VARCHAR(50) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'schema_detected', 'schema_confirmed', 'bronze_ready', 'silver_configured', 'active', 'paused', 'error')),
+    status          VARCHAR(50) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'schema_detected', 'schema_confirmed', 'bronze_ready', 'silver_configured', 'gold_configured', 'gold_ready', 'active', 'paused', 'error')),
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     metadata        JSONB DEFAULT '{}'::jsonb
@@ -120,7 +120,7 @@ CREATE INDEX idx_bronze_ingestions_status ON bronze_ingestions(status);
 CREATE TABLE transformation_modules (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
-    name            VARCHAR(255) NOT NULL,
+    name            VARCHAR(255) NOT NULL UNIQUE,
     module_type     VARCHAR(50) NOT NULL CHECK (module_type IN (
         'filter', 'drop_fields', 'add_field_calculated', 'add_field_api_enrich',
         'add_field_join_reference', 'add_field_join_bronze', 'add_field_custom_function',
@@ -176,7 +176,7 @@ CREATE INDEX idx_transformation_pipelines_pipeline ON transformation_pipelines(p
 CREATE TABLE api_connectors (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     pipeline_id     UUID REFERENCES pipelines(id) ON DELETE SET NULL,
-    name            VARCHAR(255) NOT NULL,
+    name            VARCHAR(255) NOT NULL UNIQUE,
     base_url        TEXT NOT NULL,
     auth_type       VARCHAR(50),
     auth_config     JSONB DEFAULT '{}'::jsonb,
@@ -194,7 +194,7 @@ CREATE TABLE api_connectors (
 CREATE TABLE reference_tables (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     pipeline_id     UUID REFERENCES pipelines(id) ON DELETE SET NULL,
-    name            VARCHAR(255) NOT NULL,
+    name            VARCHAR(255) NOT NULL UNIQUE,
     storage_path    TEXT NOT NULL,                 -- MinIO path
     file_format     VARCHAR(20) DEFAULT 'parquet',
     schema          JSONB,                        -- Field definitions
@@ -209,7 +209,7 @@ CREATE TABLE reference_tables (
 CREATE TABLE user_functions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     pipeline_id     UUID REFERENCES pipelines(id) ON DELETE SET NULL,
-    name            VARCHAR(255) NOT NULL,
+    name            VARCHAR(255) NOT NULL UNIQUE,
     description     TEXT,
     function_code   TEXT NOT NULL,
     input_fields    JSONB NOT NULL,               -- [{name, type}]
@@ -357,7 +357,7 @@ CREATE TABLE alert_configurations (
 CREATE TABLE silver_transformations (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
-    name            VARCHAR(255) NOT NULL,
+    name            VARCHAR(255) NOT NULL UNIQUE,
     description     TEXT,
     -- AI-generated PySpark code
     generated_code  TEXT,
@@ -407,3 +407,90 @@ CREATE TABLE conversation_messages (
 CREATE INDEX idx_conversation_messages_transformation ON conversation_messages(transformation_id);
 CREATE INDEX idx_conversation_messages_order ON conversation_messages(transformation_id, message_order);
 
+
+-- =============================================================================
+-- 17. GOLD TRANSFORMATIONS - AI-driven Gold layer transformations
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS gold_transformations (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+    name            VARCHAR(255) NOT NULL,
+    description     TEXT,
+    generated_code  TEXT,
+    confirmed_code  TEXT,
+    input_schema    JSONB,
+    output_schema   JSONB,
+    sample_input    JSONB,
+    sample_output   JSONB,
+    status          VARCHAR(50) DEFAULT 'draft',
+    conversation_count INTEGER DEFAULT 0,
+    task_order      INTEGER DEFAULT 0,
+    version         INTEGER DEFAULT 1,
+    is_active       BOOLEAN DEFAULT TRUE,
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gold_transformations_pipeline ON gold_transformations(pipeline_id);
+CREATE INDEX IF NOT EXISTS idx_gold_transformations_status ON gold_transformations(status);
+
+CREATE TRIGGER trg_gold_transformations_updated_at
+    BEFORE UPDATE ON gold_transformations
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- =============================================================================
+-- 18. GOLD CONVERSATION MESSAGES - Chat history for Gold transformations
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS gold_conversation_messages (
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    transformation_id   UUID NOT NULL REFERENCES gold_transformations(id) ON DELETE CASCADE,
+    role                VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+    content             TEXT NOT NULL,
+    code_block          TEXT,
+    dry_run_result      JSONB,
+    message_order       INTEGER NOT NULL,
+    created_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gold_conversation_messages_transformation ON gold_conversation_messages(transformation_id);
+CREATE INDEX IF NOT EXISTS idx_gold_conversation_messages_order ON gold_conversation_messages(transformation_id, message_order);
+
+-- =============================================================================
+-- 19. GOLD EXECUTIONS - Track Gold layer upload executions
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS gold_executions (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pipeline_id     UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+    status          VARCHAR(50) DEFAULT 'pending',
+    transformations_applied JSONB,
+    input_path      TEXT,
+    output_path     TEXT,
+    records_in      INTEGER,
+    records_out     INTEGER,
+    error_message   TEXT,
+    execution_time_seconds FLOAT,
+    started_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    completed_at    TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_gold_executions_pipeline ON gold_executions(pipeline_id);
+CREATE INDEX IF NOT EXISTS idx_gold_executions_status ON gold_executions(status);
+
+-- =============================================================================
+-- 20. POSTGRES PUSHES - Track Push-to-Postgres operations
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS postgres_pushes (
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pipeline_id         UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+    gold_execution_id   UUID REFERENCES gold_executions(id) ON DELETE SET NULL,
+    table_name          VARCHAR(255) NOT NULL,
+    status              VARCHAR(50) DEFAULT 'pending',
+    records_pushed      INTEGER,
+    if_exists_mode      VARCHAR(20) DEFAULT 'replace',
+    error_message       TEXT,
+    started_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    completed_at        TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_postgres_pushes_pipeline ON postgres_pushes(pipeline_id);
+CREATE INDEX IF NOT EXISTS idx_postgres_pushes_status ON postgres_pushes(status);

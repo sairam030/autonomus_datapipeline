@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.app.routers import pipelines, schemas, bronze, upload, dags, silver
+from backend.app.routers import pipelines, schemas, bronze, upload, dags, silver, gold
 from backend.app.config import get_settings
 
 # Configure logging
@@ -68,6 +68,7 @@ app.include_router(bronze.router)
 app.include_router(upload.router)
 app.include_router(dags.router)
 app.include_router(silver.router)
+app.include_router(gold.router)
 
 
 @app.get("/", tags=["Health"])

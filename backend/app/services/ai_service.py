@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_API_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 )
@@ -41,7 +41,9 @@ Your job is to help users create Silver-layer transformations by generating PySp
 2. When you DO generate code, wrap it in a ```python code fence. The code must define exactly one function: `def transform(df, spark):` that returns a DataFrame.
 3. Include necessary imports (from pyspark.sql.functions, pyspark.sql.types, etc.) INSIDE the function or at the top of the code block.
 4. Add brief inline comments explaining each transformation step.
-5. Do NOT use `spark.read` or any I/O — the input `df` is already loaded, just transform it.
+5. The input `df` is already loaded — do NOT write output (no `df.write`).
+   However, you MAY use `spark.read.csv("/opt/pipeline/data/<file>.csv", header=True, inferSchema=True)` to load **reference / lookup tables** for joins.
+   Reference files available: routes.csv (columns: FlightNo, Origin, Destination, ScheduledDepartureTime).
 6. Keep the code idiomatic PySpark — prefer DataFrame API over SQL strings.
 7. If the user asks for enrichment via external API, use `requests` inside a UDF (the Airflow workers have `requests` installed).
 8. If the user iterates ("add more columns", "also filter out…"), build on your previous code — don't start from scratch.
@@ -273,10 +275,17 @@ def validate_transform_code(code: str) -> Tuple[bool, str]:
         return False, "Code must define a `def transform(df, spark):` function."
 
     # Check for forbidden operations
-    forbidden = ["spark.read", "df.write", "os.system", "subprocess", "eval(", "exec("]
+    forbidden = ["df.write", "os.system", "subprocess", "eval(", "exec("]
     for f in forbidden:
         if f in code:
             return False, f"Code contains forbidden operation: `{f}`. Only transformations are allowed."
+
+    # Allow spark.read.csv (for reference/lookup tables) but block other spark.read variants
+    if "spark.read" in code:
+        # Remove all occurrences of spark.read.csv / spark.read.option(...).csv
+        sanitized = re.sub(r'spark\.read(?:\.option\([^)]*\))*\.csv\(', '', code)
+        if "spark.read" in sanitized:
+            return False, "Only `spark.read.csv(...)` is allowed for loading reference data. Other spark.read operations are forbidden."
 
     # Syntax check
     try:

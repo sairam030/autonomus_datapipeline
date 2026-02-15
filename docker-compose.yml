@@ -36,6 +36,7 @@ x-airflow-common: &airflow-common
     - ./backend:/opt/pipeline/backend
     - ./engine:/opt/pipeline/engine
     - pipeline-data:/data/pipeline
+    - ./generated_queries:/opt/pipeline/generated_queries
   user: "${AIRFLOW_UID:-1000}:0"
   depends_on:
     postgres:
@@ -149,6 +150,7 @@ services:
     volumes:
       - ./engine:/opt/pipeline/engine
       - ./backend:/opt/pipeline/backend
+      - ./data:/opt/pipeline/data
       - ./logs:/opt/airflow/logs
       - ./scripts:/opt/airflow/scripts
       - spark-logs:/opt/spark/logs
@@ -188,6 +190,7 @@ services:
     volumes:
       - ./engine:/opt/pipeline/engine
       - ./backend:/opt/pipeline/backend
+      - ./data:/opt/pipeline/data
       - spark-logs:/opt/spark/logs
     networks:
       - pipeline-net
@@ -227,6 +230,8 @@ services:
       - ./engine:/opt/pipeline/engine
       - pipeline-data:/data/pipeline
       - ./dags:/opt/airflow/dags
+      - ./data:/opt/pipeline/data
+      - ./generated_queries:/opt/pipeline/generated_queries
     depends_on:
       postgres:
         condition: service_healthy

@@ -9,6 +9,7 @@ Flow:
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -25,6 +26,7 @@ from backend.app.schemas.schema import (
 )
 from backend.app.services.schema_detection import scan_and_detect_schema, fetch_and_detect_api_schema
 from backend.app.services.ingestion.bronze_ingestion import ingest_to_bronze
+from backend.app.services.code_saver import save_bronze_ingestion
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/schemas", tags=["Schema Detection"])
@@ -189,6 +191,7 @@ def _run_bronze_ingestion(
     csv_config: dict,
     ingestion_id: UUID,
     db_url: str,
+    pipeline_name: str = "",
 ):
     """Background task: run Spark Bronze ingestion and update DB."""
     from sqlalchemy import create_engine
@@ -207,6 +210,7 @@ def _run_bronze_ingestion(
             csv_delimiter=csv_config.get("csv_delimiter", ","),
             csv_header=csv_config.get("csv_header", True),
             csv_encoding=csv_config.get("csv_encoding", "utf-8"),
+            pipeline_name=pipeline_name,
         )
 
         # Update ingestion record
@@ -321,7 +325,9 @@ def confirm_schema(
     pipeline.status = "schema_confirmed"
 
     # Create Bronze ingestion record
-    bronze_path = f"s3a://{settings.bronze_bucket}/{payload.pipeline_id}/v{schema_record.version}/data"
+    # Use pipeline name slug for readable MinIO paths
+    pipeline_slug = re.sub(r"[^a-z0-9]+", "_", pipeline.name.lower()).strip("_")
+    bronze_path = f"s3a://{settings.bronze_bucket}/{pipeline_slug}/v{schema_record.version}/data"
     ingestion = BronzeIngestion(
         pipeline_id=payload.pipeline_id,
         schema_version=schema_record.version,
@@ -365,6 +371,22 @@ def confirm_schema(
 
     # Kick off Bronze ingestion in background (file sources only)
     csv_config = data_source.config or {}
+
+    # Save bronze ingestion config to local filesystem
+    try:
+        save_bronze_ingestion(
+            project_name=pipeline.name,
+            pipeline_id=str(payload.pipeline_id),
+            schema_version=schema_record.version,
+            file_format=data_source.file_format or data_source.source_type,
+            compatible_files=compatible_paths,
+            fields=fields,
+            bronze_path=bronze_path,
+            csv_config=csv_config,
+        )
+    except Exception as save_err:
+        logger.warning("Could not save bronze ingestion config to disk: %s", save_err)
+
     background_tasks.add_task(
         _run_bronze_ingestion,
         pipeline_id=payload.pipeline_id,
@@ -375,6 +397,7 @@ def confirm_schema(
         csv_config=csv_config,
         ingestion_id=ingestion.id,
         db_url=settings.database_url,
+        pipeline_name=pipeline.name,
     )
 
     logger.info(

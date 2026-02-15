@@ -165,12 +165,25 @@ export const schemaApi = {
 // Bronze API
 // ============================================================================
 
+export interface DataPreview {
+  total_records: number;
+  columns: { name: string; type: string; nullable: boolean }[];
+  rows: Record<string, any>[];
+  preview_count: number;
+  bronze_path?: string;
+  silver_path?: string;
+}
+
 export const bronzeApi = {
   listIngestions: (pipelineId: string) =>
     api.get(`/api/bronze/${pipelineId}/ingestions`).then(r => r.data),
 
   getIngestionStatus: (ingestionId: string) =>
     api.get<BronzeIngestionStatus>(`/api/bronze/ingestion/${ingestionId}/status`).then(r => r.data),
+
+  /** Preview sample rows from Bronze data */
+  preview: (pipelineId: string, limit: number = 50) =>
+    api.get<DataPreview>(`/api/bronze/${pipelineId}/preview`, { params: { limit } }).then(r => r.data),
 };
 
 // ============================================================================
@@ -275,8 +288,44 @@ export interface SilverTransformation {
   sample_output: any[];
   conversation_count: number;
   task_order: number;
+  version: number;
+  is_active: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface TransformResult {
+  id: string;
+  name: string;
+  version: number;
+  status: 'success' | 'failed';
+  error?: string;
+  duration_seconds: number;
+}
+
+export interface UploadToSilverResult {
+  success: boolean;
+  execution_id: string;
+  input_records: number;
+  output_records: number;
+  output_path: string;
+  duration_seconds: number;
+  transformations_applied: number;
+  error: string | null;
+  transform_results: TransformResult[];
+}
+
+export interface SilverExecution {
+  id: string;
+  status: string;
+  input_records: number;
+  output_records: number;
+  output_path: string;
+  duration_seconds: number;
+  transformations_applied: number;
+  error: string | null;
+  started_at: string;
+  completed_at: string;
 }
 
 export interface ConversationMessage {
@@ -343,7 +392,192 @@ export const silverApi = {
   dryRun: (projectId: string, transformId: string) =>
     api.post<DryRunResult>(`/api/silver/${projectId}/transformations/${transformId}/dry-run`).then(r => r.data),
 
-  /** Confirm the transformation code */
-  confirm: (projectId: string, transformId: string, code: string) =>
-    api.post<SilverTransformation>(`/api/silver/${projectId}/transformations/${transformId}/confirm`, { code }).then(r => r.data),
+  /** Confirm the transformation code with a name */
+  confirm: (projectId: string, transformId: string, name: string, code: string) =>
+    api.post<SilverTransformation>(
+      `/api/silver/${projectId}/transformations/${transformId}/confirm`,
+      { name, code }
+    ).then(r => r.data),
+
+  /** Get version history for a transformation at a given task_order */
+  getVersions: (projectId: string, taskOrder: number) =>
+    api.get<SilverTransformation[]>(
+      `/api/silver/${projectId}/transformations/order/${taskOrder}/versions`
+    ).then(r => r.data),
+
+  /** Upload to silver — apply all confirmed transforms to bronze data */
+  uploadToSilver: (projectId: string, transformationIds?: string[]) =>
+    api.post<UploadToSilverResult>(
+      `/api/silver/${projectId}/upload-to-silver`,
+      { transformation_ids: transformationIds || null }
+    ).then(r => r.data),
+
+  /** List silver execution history */
+  listExecutions: (projectId: string) =>
+    api.get<SilverExecution[]>(`/api/silver/${projectId}/executions`).then(r => r.data),
+
+  /** Preview sample rows from Silver data */
+  preview: (projectId: string, limit: number = 50) =>
+    api.get<DataPreview>(`/api/silver/${projectId}/preview`, { params: { limit } }).then(r => r.data),
+
+  /** Rollback to a specific version */
+  rollback: (projectId: string, transformId: string) =>
+    api.post<SilverTransformation>(`/api/silver/${projectId}/transformations/${transformId}/rollback`).then(r => r.data),
+
+  /** Reorder transformations */
+  reorder: (projectId: string, order: string[]) =>
+    api.put(`/api/silver/${projectId}/transformations/reorder`, order).then(r => r.data),
+};
+
+// ============================================================================
+// Gold Transformation API
+// ============================================================================
+
+export interface GoldTransformation {
+  id: string;
+  pipeline_id: string;
+  name: string;
+  description: string | null;
+  status: string;
+  generated_code: string | null;
+  confirmed_code: string | null;
+  input_schema: any[];
+  sample_input: any[];
+  sample_output: any[];
+  conversation_count: number;
+  task_order: number;
+  version: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UploadToGoldResult {
+  success: boolean;
+  execution_id: string;
+  input_records: number;
+  output_records: number;
+  output_path: string;
+  duration_seconds: number;
+  transformations_applied: number;
+  error: string | null;
+  transform_results: TransformResult[];
+}
+
+export interface GoldExecution {
+  id: string;
+  status: string;
+  input_records: number;
+  output_records: number;
+  output_path: string;
+  duration_seconds: number;
+  transformations_applied: number;
+  error: string | null;
+  started_at: string;
+  completed_at: string;
+}
+
+export interface PushToPostgresResult {
+  success: boolean;
+  push_id: string;
+  table_name: string;
+  records_pushed: number;
+  duration_seconds: number;
+  error: string | null;
+}
+
+export interface PostgresPushRecord {
+  id: string;
+  table_name: string;
+  status: string;
+  records_pushed: number;
+  duration_seconds: number;
+  error: string | null;
+  created_at: string;
+  completed_at: string;
+}
+
+export const goldApi = {
+  /** Create a new Gold transformation */
+  create: (projectId: string, data: { name: string; description?: string }) =>
+    api.post<GoldTransformation>(`/api/gold/${projectId}/transformations`, data).then(r => r.data),
+
+  /** List all Gold transformations for a project */
+  list: (projectId: string) =>
+    api.get<GoldTransformation[]>(`/api/gold/${projectId}/transformations`).then(r => r.data),
+
+  /** Get a specific Gold transformation */
+  get: (projectId: string, transformId: string) =>
+    api.get<GoldTransformation>(`/api/gold/${projectId}/transformations/${transformId}`).then(r => r.data),
+
+  /** Delete a Gold transformation */
+  delete: (projectId: string, transformId: string) =>
+    api.delete(`/api/gold/${projectId}/transformations/${transformId}`).then(r => r.data),
+
+  /** Get conversation messages */
+  getMessages: (projectId: string, transformId: string) =>
+    api.get<ConversationMessage[]>(`/api/gold/${projectId}/transformations/${transformId}/messages`).then(r => r.data),
+
+  /** Send a chat message */
+  chat: (projectId: string, transformId: string, message: string) =>
+    api.post<ChatResponse>(`/api/gold/${projectId}/transformations/${transformId}/chat`, { message }).then(r => r.data),
+
+  /** Clear chat history */
+  clearChat: (projectId: string, transformId: string) =>
+    api.post(`/api/gold/${projectId}/transformations/${transformId}/clear-chat`).then(r => r.data),
+
+  /** Update code */
+  updateCode: (projectId: string, transformId: string, code: string) =>
+    api.put(`/api/gold/${projectId}/transformations/${transformId}/code`, { code }).then(r => r.data),
+
+  /** Dry-run */
+  dryRun: (projectId: string, transformId: string) =>
+    api.post<DryRunResult>(`/api/gold/${projectId}/transformations/${transformId}/dry-run`).then(r => r.data),
+
+  /** Confirm */
+  confirm: (projectId: string, transformId: string, name: string, code: string) =>
+    api.post<GoldTransformation>(
+      `/api/gold/${projectId}/transformations/${transformId}/confirm`,
+      { name, code }
+    ).then(r => r.data),
+
+  /** Get version history */
+  getVersions: (projectId: string, taskOrder: number) =>
+    api.get<GoldTransformation[]>(
+      `/api/gold/${projectId}/transformations/order/${taskOrder}/versions`
+    ).then(r => r.data),
+
+  /** Upload to Gold */
+  uploadToGold: (projectId: string, transformationIds?: string[]) =>
+    api.post<UploadToGoldResult>(
+      `/api/gold/${projectId}/upload-to-gold`,
+      { transformation_ids: transformationIds || null }
+    ).then(r => r.data),
+
+  /** Push Gold data to Postgres */
+  pushToPostgres: (projectId: string, tableName: string, ifExists: string = 'replace') =>
+    api.post<PushToPostgresResult>(
+      `/api/gold/${projectId}/push-to-postgres`,
+      { table_name: tableName, if_exists: ifExists }
+    ).then(r => r.data),
+
+  /** List Gold execution history */
+  listExecutions: (projectId: string) =>
+    api.get<GoldExecution[]>(`/api/gold/${projectId}/executions`).then(r => r.data),
+
+  /** List Postgres push history */
+  listPostgresPushes: (projectId: string) =>
+    api.get<PostgresPushRecord[]>(`/api/gold/${projectId}/postgres-pushes`).then(r => r.data),
+
+  /** Preview Gold data */
+  preview: (projectId: string, limit: number = 50) =>
+    api.get<DataPreview>(`/api/gold/${projectId}/preview`, { params: { limit } }).then(r => r.data),
+
+  /** Rollback to a specific version */
+  rollback: (projectId: string, transformId: string) =>
+    api.post<GoldTransformation>(`/api/gold/${projectId}/transformations/${transformId}/rollback`).then(r => r.data),
+
+  /** Reorder Gold transformations */
+  reorder: (projectId: string, order: string[]) =>
+    api.put(`/api/gold/${projectId}/transformations/reorder`, order).then(r => r.data),
 };

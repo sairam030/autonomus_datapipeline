@@ -54,3 +54,87 @@ def get_ingestion_status(ingestion_id: UUID, db: Session = Depends(get_db)):
         duration_seconds=ingestion.duration_seconds or 0,
         error_message=ingestion.error_message,
     )
+
+
+_spark_preview = None
+
+
+def _get_preview_spark():
+    """Get or create a reusable SparkSession for preview operations."""
+    import os
+    from pyspark.sql import SparkSession
+
+    global _spark_preview
+    # Reuse existing session if still alive
+    if _spark_preview is not None:
+        try:
+            _spark_preview.sparkContext._jsc.sc().isStopped()
+            return _spark_preview
+        except Exception:
+            _spark_preview = None
+
+    minio_endpoint = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
+    minio_access = os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin")
+    minio_secret = os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin")
+
+    _spark_preview = (
+        SparkSession.builder
+        .master("local[1]")
+        .appName("bronze_preview")
+        .config("spark.driver.memory", "512m")
+        .config("spark.ui.enabled", "false")
+        .config("spark.hadoop.fs.s3a.endpoint", minio_endpoint)
+        .config("spark.hadoop.fs.s3a.access.key", minio_access)
+        .config("spark.hadoop.fs.s3a.secret.key", minio_secret)
+        .config("spark.hadoop.fs.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        .getOrCreate()
+    )
+    _spark_preview.sparkContext.setLogLevel("WARN")
+    return _spark_preview
+
+
+@router.get("/{pipeline_id}/preview")
+def preview_bronze_data(
+    pipeline_id: UUID,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """Preview sample rows from the latest Bronze ingestion data."""
+    ingestion = (
+        db.query(BronzeIngestion)
+        .filter(BronzeIngestion.pipeline_id == pipeline_id, BronzeIngestion.status == "success")
+        .order_by(BronzeIngestion.created_at.desc())
+        .first()
+    )
+    if not ingestion:
+        raise HTTPException(404, "No successful Bronze ingestion found")
+
+    bronze_path = ingestion.bronze_path
+    if not bronze_path:
+        raise HTTPException(404, "Bronze path not available")
+
+    try:
+        spark = _get_preview_spark()
+        df = spark.read.option("header", "true").option("inferSchema", "true").csv(bronze_path)
+        schema_info = [{"name": f.name, "type": str(f.dataType), "nullable": f.nullable} for f in df.schema.fields]
+        sample_rows = [row.asDict() for row in df.limit(limit).collect()]
+
+        # Use stored total_records from ingestion if available to avoid expensive count()
+        total_count = ingestion.total_records if ingestion.total_records else len(sample_rows)
+
+        # Stringify values for JSON serialization
+        for row in sample_rows:
+            for k, v in row.items():
+                if v is not None and not isinstance(v, (str, int, float, bool)):
+                    row[k] = str(v)
+
+        return {
+            "total_records": total_count,
+            "columns": schema_info,
+            "rows": sample_rows,
+            "bronze_path": bronze_path,
+            "preview_count": len(sample_rows),
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Failed to preview Bronze data: {str(e)}")

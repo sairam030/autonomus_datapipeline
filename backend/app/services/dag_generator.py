@@ -13,6 +13,7 @@ import os
 import re
 import logging
 from datetime import datetime
+from backend.app.services.code_saver import save_dag_code
 from typing import Optional
 from uuid import UUID
 
@@ -588,6 +589,12 @@ class DAGGenerator:
 
         logger.info("Generated Bronze DAG: %s → %s", dag_id, filepath)
 
+        # Save a copy to generated_queries
+        try:
+            save_dag_code(project_name, "bronze", dag_id, dag_code)
+        except Exception:
+            pass
+
         return {
             "dag_id": dag_id,
             "dag_type": "bronze",
@@ -662,6 +669,12 @@ class DAGGenerator:
             f.write(dag_code)
 
         logger.info("Generated Master DAG: %s → %s", dag_id, filepath)
+
+        # Save a copy to generated_queries
+        try:
+            save_dag_code(project_name, "master", dag_id, dag_code)
+        except Exception:
+            pass
 
         return {
             "dag_id": dag_id,

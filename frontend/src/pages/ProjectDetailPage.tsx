@@ -23,12 +23,13 @@ import {
   ArrowUpward as UpIcon,
   ArrowDownward as DownIcon,
   DragIndicator as DragIcon,
+  Warning as WarningIcon,
 } from '@mui/icons-material';
 import {
   pipelineApi, Pipeline, schemaApi, bronzeApi,
   dagApi, DAGScheduleConfig, DAGInfo, DAGFileInfo, GenerateDAGResponse,
   TaskDAGRequest, MasterDAGRequest,
-  silverApi,
+  silverApi, goldApi,
 } from '../services/api';
 
 // ============================================================================
@@ -112,6 +113,26 @@ export default function ProjectDetailPage() {
   const [dagGenerating, setDagGenerating] = useState(false);
   const [dagResultInfo, setDagResultInfo] = useState<DAGInfo | null>(null);
   const [dagError, setDagError] = useState<string | null>(null);
+
+  // Delete project dialog
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deletingProject, setDeletingProject] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleDeleteProject = async () => {
+    if (!project || deleteConfirmText !== project.name) return;
+    setDeletingProject(true);
+    setDeleteError(null);
+    try {
+      await pipelineApi.delete(project.id);
+      navigate('/');
+    } catch (err: any) {
+      setDeleteError(err.response?.data?.detail || 'Failed to delete project');
+    } finally {
+      setDeletingProject(false);
+    }
+  };
 
   // Existing DAG files
   const [existingDags, setExistingDags] = useState<DAGFileInfo[]>([]);
@@ -201,10 +222,14 @@ export default function ProjectDetailPage() {
         });
 
         // Gold task
+        const goldStatus: Task['status'] = p.status === 'gold_configured' || p.status === 'gold_ready'
+          ? 'completed' : 'not_started';
         derivedTasks.push({
           id: 'gold', type: 'gold', label: 'Gold Aggregation',
-          status: 'not_started',
-          description: 'Aggregate and prepare data for analytics',
+          status: goldStatus,
+          description: goldStatus === 'completed'
+            ? 'Data aggregated and ready for analytics'
+            : 'Aggregate and prepare data for analytics',
         });
 
         setTasks(derivedTasks);
@@ -234,7 +259,7 @@ export default function ProjectDetailPage() {
       // Create or navigate to silver transformation
       handleSilverAction();
     } else if (task.type === 'gold') {
-      alert('Gold task creation coming soon!');
+      handleGoldAction();
     }
   };
 
@@ -256,6 +281,24 @@ export default function ProjectDetailPage() {
       }
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to open Silver transformation');
+    }
+  };
+
+  const handleGoldAction = async () => {
+    if (!projectId) return;
+    try {
+      const existing = await goldApi.list(projectId);
+      if (existing.length > 0) {
+        navigate(`/project/${projectId}/gold/${existing[0].id}`);
+      } else {
+        const t = await goldApi.create(projectId, {
+          name: 'Gold Aggregation',
+          description: 'AI-driven analytics transformation',
+        });
+        navigate(`/project/${projectId}/gold/${t.id}`);
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to open Gold transformation');
     }
   };
 
@@ -410,6 +453,7 @@ export default function ProjectDetailPage() {
   }
 
   const bronzeDone = tasks.find(t => t.type === 'bronze')?.status === 'completed';
+  const silverDone = tasks.find(t => t.type === 'silver')?.status === 'completed';
   const bronzeConfigured = tasks.find(t => t.type === 'bronze')?.status !== 'not_started';
   const hasDags = existingDags.length > 0;
 
@@ -425,11 +469,17 @@ export default function ProjectDetailPage() {
             {project.description || 'No description'}
           </Typography>
         </Box>
-        <Box display="flex" gap={1}>
+        <Box display="flex" gap={1} alignItems="center">
           <Chip label={project.source_type.toUpperCase()} variant="outlined" size="small" />
           {project.status === 'active' && (
             <Chip label="DAG Active" color="success" size="small" />
           )}
+          <Tooltip title="Delete Project">
+            <IconButton size="small" color="error"
+              onClick={() => { setDeleteConfirmText(''); setDeleteError(null); setDeleteDialogOpen(true); }}>
+              <DeleteIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
         </Box>
       </Box>
 
@@ -537,7 +587,7 @@ export default function ProjectDetailPage() {
                       onClick={() => handleTaskAction(task)}
                       disabled={
                         (task.type === 'silver' && !bronzeDone) ||
-                        (task.type === 'gold' && !bronzeDone)
+                        (task.type === 'gold' && !silverDone)
                       }
                     >
                       {getTaskActionLabel(task)}
@@ -936,6 +986,47 @@ export default function ProjectDetailPage() {
               )}
             </>
           )}
+        </DialogActions>
+      </Dialog>
+      {/* Delete Project Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <WarningIcon color="error" />
+          Delete Project
+        </DialogTitle>
+        <DialogContent>
+          {deleteError && <Alert severity="error" sx={{ mb: 2 }}>{deleteError}</Alert>}
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            This will permanently delete <strong>{project?.name}</strong> and all associated data
+            including schemas, Bronze ingestions, Silver transformations, conversations, and execution records.
+            This action <strong>cannot be undone</strong>.
+          </Alert>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            To confirm, type the project name <strong>{project?.name}</strong> below:
+          </Typography>
+          <TextField
+            fullWidth autoFocus
+            placeholder={project?.name}
+            value={deleteConfirmText}
+            onChange={e => setDeleteConfirmText(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && deleteConfirmText === project?.name) handleDeleteProject();
+            }}
+          />
+          {deleteConfirmText.length > 0 && deleteConfirmText !== project?.name && (
+            <Typography variant="caption" color="error" sx={{ mt: 0.5, display: 'block' }}>
+              Name does not match
+            </Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
+          <Button variant="contained" color="error"
+            onClick={handleDeleteProject}
+            disabled={deletingProject || deleteConfirmText !== project?.name}
+            startIcon={deletingProject ? <CircularProgress size={16} color="inherit" /> : <DeleteIcon />}>
+            {deletingProject ? 'Deleting\u2026' : 'Delete Project'}
+          </Button>
         </DialogActions>
       </Dialog>
     </Box>

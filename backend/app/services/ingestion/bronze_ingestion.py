@@ -86,6 +86,7 @@ def ingest_to_bronze(
     csv_delimiter: str = ",",
     csv_header: bool = True,
     csv_encoding: str = "utf-8",
+    pipeline_name: str = "",
 ) -> dict:
     """
     Read compatible files and write to MinIO Bronze as CSV.
@@ -99,23 +100,21 @@ def ingest_to_bronze(
         csv_delimiter: CSV delimiter character
         csv_header: Whether CSV has header row
         csv_encoding: CSV file encoding
+        pipeline_name: Human-readable pipeline name (used for MinIO path slug)
 
     Returns:
-        dict with ingestion results:
-        {
-            "bronze_path": "s3a://bronze/{pipeline_id}/v{version}/data",
-            "total_records": int,
-            "files_ingested": [{path, rows, status}],
-            "files_skipped": [{path, reason}],
-            "duration_seconds": float,
-            "status": "success" | "failed",
-            "error_message": str | None
-        }
+        dict with ingestion results
     """
+    import re as _re
     settings = get_settings()
     start_time = time.time()
 
-    bronze_path = f"s3a://{settings.bronze_bucket}/{pipeline_id}/v{schema_version}/data"
+    # Use slug of pipeline name for readable MinIO paths; fall back to UUID
+    if pipeline_name:
+        folder = _re.sub(r"[^a-z0-9]+", "_", pipeline_name.lower()).strip("_")
+    else:
+        folder = str(pipeline_id)
+    bronze_path = f"s3a://{settings.bronze_bucket}/{folder}/v{schema_version}/data"
     today = date.today().isoformat()
 
     result = {

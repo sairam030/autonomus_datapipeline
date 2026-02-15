@@ -17,7 +17,7 @@ class Pipeline(Base):
     __tablename__ = "pipelines"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name = Column(String(255), nullable=False)
+    name = Column(String(255), nullable=False, unique=True)
     description = Column(Text)
     source_type = Column(String(50), nullable=False)
     status = Column(String(50), nullable=False, default="draft")
@@ -31,6 +31,12 @@ class Pipeline(Base):
     bronze_ingestions = relationship("BronzeIngestion", back_populates="pipeline", cascade="all, delete-orphan")
     transformation_modules = relationship("TransformationModule", back_populates="pipeline", cascade="all, delete-orphan")
     executions = relationship("PipelineExecution", back_populates="pipeline", cascade="all, delete-orphan")
+    silver_transformations = relationship("SilverTransformation", back_populates="pipeline", cascade="all, delete-orphan")
+    transformation_pipelines = relationship("TransformationPipeline", cascade="all, delete-orphan", passive_deletes=True)
+    silver_executions = relationship("SilverExecution", cascade="all, delete-orphan", passive_deletes=True)
+    gold_transformations = relationship("GoldTransformation", back_populates="pipeline", cascade="all, delete-orphan")
+    gold_executions = relationship("GoldExecution", cascade="all, delete-orphan", passive_deletes=True)
+    postgres_pushes = relationship("PostgresPush", cascade="all, delete-orphan", passive_deletes=True)
 
 
 class DataSource(Base):
@@ -120,7 +126,7 @@ class TransformationModule(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pipeline_id = Column(UUID(as_uuid=True), ForeignKey("pipelines.id", ondelete="CASCADE"), nullable=False)
-    name = Column(String(255), nullable=False)
+    name = Column(String(255), nullable=False, unique=True)
     module_type = Column(String(50), nullable=False)
     description = Column(Text)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
@@ -191,7 +197,7 @@ class ApiConnector(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pipeline_id = Column(UUID(as_uuid=True), ForeignKey("pipelines.id", ondelete="SET NULL"))
-    name = Column(String(255), nullable=False)
+    name = Column(String(255), nullable=False, unique=True)
     base_url = Column(Text, nullable=False)
     auth_type = Column(String(50))
     auth_config = Column(JSONB, default={})
@@ -208,7 +214,7 @@ class ReferenceTable(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pipeline_id = Column(UUID(as_uuid=True), ForeignKey("pipelines.id", ondelete="SET NULL"))
-    name = Column(String(255), nullable=False)
+    name = Column(String(255), nullable=False, unique=True)
     storage_path = Column(Text, nullable=False)
     file_format = Column(String(20), default="parquet")
     schema = Column(JSONB)
@@ -248,12 +254,14 @@ class SilverTransformation(Base):
     status = Column(String(50), default="draft")
     conversation_count = Column(Integer, default=0)
     task_order = Column(Integer, default=1)
+    version = Column(Integer, default=1)
+    is_active = Column(Boolean, default=True)
     # Timestamps
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    pipeline = relationship("Pipeline", backref="silver_transformations")
+    pipeline = relationship("Pipeline", back_populates="silver_transformations")
     messages = relationship("ConversationMessage", back_populates="transformation",
                           cascade="all, delete-orphan", order_by="ConversationMessage.message_order")
 
@@ -271,3 +279,104 @@ class ConversationMessage(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
     transformation = relationship("SilverTransformation", back_populates="messages")
+
+
+class SilverExecution(Base):
+    __tablename__ = "silver_executions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pipeline_id = Column(UUID(as_uuid=True), ForeignKey("pipelines.id", ondelete="CASCADE"), nullable=False)
+    transformation_ids = Column(JSONB, default=[])
+    status = Column(String(50), default="running")
+    input_path = Column(Text)
+    output_path = Column(Text)
+    input_records = Column(BigInteger, default=0)
+    output_records = Column(BigInteger, default=0)
+    duration_seconds = Column(Float, default=0)
+    error_message = Column(Text)
+    started_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    completed_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+# ============================================================================
+# Gold Layer Models
+# ============================================================================
+
+class GoldTransformation(Base):
+    __tablename__ = "gold_transformations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pipeline_id = Column(UUID(as_uuid=True), ForeignKey("pipelines.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+    # AI-generated PySpark code
+    generated_code = Column(Text)
+    confirmed_code = Column(Text)
+    # Schema context (from silver output)
+    input_schema = Column(JSONB, default=[])
+    output_schema = Column(JSONB, default=[])
+    sample_input = Column(JSONB, default=[])
+    sample_output = Column(JSONB, default=[])
+    # Status
+    status = Column(String(50), default="draft")
+    conversation_count = Column(Integer, default=0)
+    task_order = Column(Integer, default=1)
+    version = Column(Integer, default=1)
+    is_active = Column(Boolean, default=True)
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    pipeline = relationship("Pipeline", back_populates="gold_transformations")
+    messages = relationship("GoldConversationMessage", back_populates="transformation",
+                          cascade="all, delete-orphan", order_by="GoldConversationMessage.message_order")
+
+
+class GoldConversationMessage(Base):
+    __tablename__ = "gold_conversation_messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    transformation_id = Column(UUID(as_uuid=True), ForeignKey("gold_transformations.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String(20), nullable=False)
+    content = Column(Text, nullable=False)
+    code_block = Column(Text)
+    dry_run_result = Column(JSONB)
+    message_order = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+    transformation = relationship("GoldTransformation", back_populates="messages")
+
+
+class GoldExecution(Base):
+    __tablename__ = "gold_executions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pipeline_id = Column(UUID(as_uuid=True), ForeignKey("pipelines.id", ondelete="CASCADE"), nullable=False)
+    transformation_ids = Column(JSONB, default=[])
+    status = Column(String(50), default="running")
+    input_path = Column(Text)
+    output_path = Column(Text)
+    input_records = Column(BigInteger, default=0)
+    output_records = Column(BigInteger, default=0)
+    duration_seconds = Column(Float, default=0)
+    error_message = Column(Text)
+    started_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    completed_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class PostgresPush(Base):
+    __tablename__ = "postgres_pushes"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pipeline_id = Column(UUID(as_uuid=True), ForeignKey("pipelines.id", ondelete="CASCADE"), nullable=False)
+    gold_execution_id = Column(UUID(as_uuid=True), ForeignKey("gold_executions.id", ondelete="SET NULL"))
+    table_name = Column(String(255), nullable=False)
+    status = Column(String(50), default="running")
+    records_pushed = Column(BigInteger, default=0)
+    duration_seconds = Column(Float, default=0)
+    error_message = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    completed_at = Column(DateTime(timezone=True))

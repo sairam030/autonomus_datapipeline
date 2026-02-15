@@ -10,6 +10,7 @@ import ProjectDetailPage from './pages/ProjectDetailPage';
 import CreateTaskPage from './pages/CreateTaskPage';
 import SchemaPreviewPage from './pages/SchemaPreviewPage';
 import SilverEnrichmentPage from './pages/SilverEnrichmentPage';
+import GoldEnrichmentPage from './pages/GoldEnrichmentPage';
 
 // ============================================================================
 // Dark Theme
@@ -110,6 +111,7 @@ function App() {
               <Route path="/project/:projectId/task/create" element={<CreateTaskPage />} />
               <Route path="/project/:projectId/task/:taskId/schema" element={<SchemaPreviewPage />} />
               <Route path="/project/:projectId/silver/:transformId" element={<SilverEnrichmentPage />} />
+              <Route path="/project/:projectId/gold/:transformId" element={<GoldEnrichmentPage />} />
             </Routes>
           </Layout>
         </BrowserRouter>

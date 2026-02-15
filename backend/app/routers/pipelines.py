@@ -29,6 +29,11 @@ router = APIRouter(prefix="/api/pipelines", tags=["Pipelines"])
 @router.post("/", response_model=PipelineResponse, status_code=201)
 def create_pipeline(payload: PipelineCreate, db: Session = Depends(get_db)):
     """Create a new pipeline with source type selection."""
+    # Validate name uniqueness
+    existing = db.query(Pipeline).filter(Pipeline.name == payload.name).first()
+    if existing:
+        raise HTTPException(400, f"A project with name '{payload.name}' already exists. Please use a unique name.")
+
     pipeline = Pipeline(
         name=payload.name,
         description=payload.description,
@@ -86,6 +91,10 @@ def update_pipeline(pipeline_id: UUID, payload: PipelineUpdate, db: Session = De
     old_values = {"name": pipeline.name, "status": pipeline.status}
 
     if payload.name is not None:
+        if payload.name != pipeline.name:
+            dup = db.query(Pipeline).filter(Pipeline.name == payload.name).first()
+            if dup:
+                raise HTTPException(400, f"A project with name '{payload.name}' already exists.")
         pipeline.name = payload.name
     if payload.description is not None:
         pipeline.description = payload.description

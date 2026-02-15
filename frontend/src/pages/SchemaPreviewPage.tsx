@@ -7,6 +7,7 @@ import {
   MenuItem, FormControl, Accordion, AccordionSummary,
   AccordionDetails, LinearProgress, TextField, IconButton,
   Tooltip, Divider, Switch, FormControlLabel,
+  Dialog, DialogTitle, DialogContent, DialogActions,
 } from '@mui/material';
 import {
   ExpandMore as ExpandIcon,
@@ -16,10 +17,11 @@ import {
   Edit as EditIcon,
   Save as SaveIcon,
   Refresh as RefreshIcon,
+  Visibility as PreviewIcon,
 } from '@mui/icons-material';
 import {
   schemaApi, bronzeApi, pipelineApi,
-  SchemaDetectionResult, FieldSchema, FileInfo, BronzeIngestionStatus,
+  SchemaDetectionResult, FieldSchema, FileInfo, BronzeIngestionStatus, DataPreview,
 } from '../services/api';
 
 const TYPE_OPTIONS = ['string', 'integer', 'float', 'boolean', 'timestamp', 'date', 'long', 'double'];
@@ -61,6 +63,23 @@ export default function SchemaPreviewPage() {
 
   // Source type awareness
   const [sourceType, setSourceType] = useState<string>('csv');
+
+  // Bronze data preview
+  const [previewData, setPreviewData] = useState<DataPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewDialogOpen, setPreviewDialogOpen] = useState(false);
+
+  const handleBronzePreview = async () => {
+    if (!pipelineId) return;
+    setPreviewLoading(true); setPreviewData(null); setPreviewDialogOpen(true);
+    try {
+      const data = await bronzeApi.preview(pipelineId, 50);
+      setPreviewData(data);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to load Bronze preview');
+      setPreviewDialogOpen(false);
+    } finally { setPreviewLoading(false); }
+  };
 
   // =========================================================================
   // Load / detect schema
@@ -285,6 +304,12 @@ export default function SchemaPreviewPage() {
             {ingestionStatus.error_message && (
               <Alert severity="error" sx={{ mt: 1 }}>{ingestionStatus.error_message}</Alert>
             )}
+            {ingestionStatus.status === 'success' && (
+              <Button variant="outlined" startIcon={<PreviewIcon />}
+                onClick={handleBronzePreview} sx={{ mt: 1.5, textTransform: 'none' }}>
+                Preview Bronze Data
+              </Button>
+            )}
           </CardContent>
         </Card>
       )}
@@ -483,6 +508,56 @@ export default function SchemaPreviewPage() {
           </Button>
         </Box>
       </Box>
+
+      {/* Bronze Data Preview Dialog */}
+      <Dialog open={previewDialogOpen} onClose={() => setPreviewDialogOpen(false)} maxWidth="lg" fullWidth
+        PaperProps={{ sx: { maxHeight: '80vh' } }}>
+        <DialogTitle>
+          <Box display="flex" alignItems="center" gap={1}>
+            <PreviewIcon color="warning" />
+            <Typography variant="h6">Bronze Data Preview</Typography>
+            {previewData && <Chip label={`${previewData.total_records.toLocaleString()} total records`} size="small" variant="outlined" />}
+          </Box>
+        </DialogTitle>
+        <DialogContent dividers>
+          {previewLoading ? (
+            <Box display="flex" justifyContent="center" alignItems="center" py={4}>
+              <CircularProgress /><Typography sx={{ ml: 2 }}>Loading preview…</Typography>
+            </Box>
+          ) : previewData ? (
+            <TableContainer sx={{ maxHeight: '60vh' }}>
+              <Table size="small" stickyHeader>
+                <TableHead><TableRow>
+                  {previewData.columns.map(col => (
+                    <TableCell key={col.name} sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
+                      <Box>{col.name}<Typography variant="caption" display="block" color="text.secondary">{col.type}</Typography></Box>
+                    </TableCell>
+                  ))}
+                </TableRow></TableHead>
+                <TableBody>{previewData.rows.map((row, idx) => (
+                  <TableRow key={idx} hover>
+                    {previewData.columns.map(col => (
+                      <TableCell key={col.name} sx={{ fontSize: '0.8rem', fontFamily: 'monospace', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {row[col.name] != null ? String(row[col.name]) : '—'}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))}</TableBody>
+              </Table>
+            </TableContainer>
+          ) : (
+            <Typography color="text.secondary">No data available.</Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          {previewData && (
+            <Typography variant="caption" color="text.secondary" sx={{ mr: 'auto', ml: 1 }}>
+              Showing {previewData.preview_count} of {previewData.total_records.toLocaleString()} rows
+            </Typography>
+          )}
+          <Button onClick={() => setPreviewDialogOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

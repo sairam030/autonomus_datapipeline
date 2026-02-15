@@ -27,6 +27,8 @@ class PipelineStatus(str, Enum):
     schema_confirmed = "schema_confirmed"
     bronze_ready = "bronze_ready"
     silver_configured = "silver_configured"
+    gold_configured = "gold_configured"
+    gold_ready = "gold_ready"
     active = "active"
     paused = "paused"
     error = "error"

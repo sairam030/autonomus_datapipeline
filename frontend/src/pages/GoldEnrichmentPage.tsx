@@ -6,7 +6,7 @@ import {
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem,
   ListItemButton, ListItemText, ListItemIcon, Badge, Checkbox, FormControlLabel,
-  Tabs, Tab, Collapse,
+  Tabs, Tab, Collapse, MenuItem, Select, InputLabel, FormControl,
 } from '@mui/material';
 import {
   Send as SendIcon,
@@ -33,6 +33,7 @@ import {
   Timeline as TimelineIcon,
   ExpandMore as ExpandIcon,
   ExpandLess as CollapseIcon,
+  Storage as PostgresIcon,
 } from '@mui/icons-material';
 import Editor from '@monaco-editor/react';
 import {
@@ -45,9 +46,10 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
-  silverApi, bronzeApi,
-  SilverTransformation, ConversationMessage, DryRunResult,
-  DataPreview, SilverExecution, UploadToSilverResult,
+  goldApi, silverApi,
+  GoldTransformation, ConversationMessage, DryRunResult,
+  DataPreview, GoldExecution, UploadToGoldResult,
+  PushToPostgresResult, PostgresPushRecord,
 } from '../services/api';
 
 // ============================================================================
@@ -70,7 +72,7 @@ const STATUS_LABELS: Record<string, string> = {
 function SortableTransformItem({
   t, transformId, projectId, navigate, handleDelete,
 }: {
-  t: SilverTransformation; transformId: string | undefined;
+  t: GoldTransformation; transformId: string | undefined;
   projectId: string | undefined; navigate: any; handleDelete: (id: string) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: t.id });
@@ -93,16 +95,16 @@ function SortableTransformItem({
     >
       <ListItemButton
         selected={t.id === transformId}
-        onClick={() => { if (t.id !== transformId) navigate(`/project/${projectId}/silver/${t.id}`); }}
+        onClick={() => { if (t.id !== transformId) navigate(`/project/${projectId}/gold/${t.id}`); }}
         sx={{ py: 0.8 }}
       >
         <Box {...attributes} {...listeners} sx={{ cursor: 'grab', display: 'flex', mr: 0.5 }}>
           <DragIcon sx={{ fontSize: 16, color: 'text.disabled' }} />
         </Box>
         <ListItemIcon sx={{ minWidth: 28 }}>
-          <Badge badgeContent={`v${t.version}`} color="primary"
+          <Badge badgeContent={`v${t.version}`} color="warning"
             sx={{ '& .MuiBadge-badge': { fontSize: '0.55rem', height: 14, minWidth: 14 } }}>
-            <CodeIcon sx={{ fontSize: 18, color: t.status === 'confirmed' ? '#4caf50' : '#666' }} />
+            <CodeIcon sx={{ fontSize: 18, color: t.status === 'confirmed' ? '#ffd700' : '#666' }} />
           </Badge>
         </ListItemIcon>
         <ListItemText
@@ -119,13 +121,13 @@ function SortableTransformItem({
 // ============================================================================
 // Main page
 // ============================================================================
-export default function SilverEnrichmentPage() {
+export default function GoldEnrichmentPage() {
   const { projectId, transformId } = useParams<{ projectId: string; transformId: string }>();
   const navigate = useNavigate();
 
   // All transformations
-  const [allTransforms, setAllTransforms] = useState<SilverTransformation[]>([]);
-  const [transformation, setTransformation] = useState<SilverTransformation | null>(null);
+  const [allTransforms, setAllTransforms] = useState<GoldTransformation[]>([]);
+  const [transformation, setTransformation] = useState<GoldTransformation | null>(null);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -157,28 +159,37 @@ export default function SilverEnrichmentPage() {
   const [newTransformName, setNewTransformName] = useState('');
   const [creatingTransform, setCreatingTransform] = useState(false);
 
-  // Upload to silver
+  // Upload to Gold
   const [uploading, setUploading] = useState(false);
-  const [uploadResult, setUploadResult] = useState<UploadToSilverResult | null>(null);
+  const [uploadResult, setUploadResult] = useState<UploadToGoldResult | null>(null);
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [selectedForUpload, setSelectedForUpload] = useState<string[]>([]);
 
+  // Push to Postgres
+  const [pushDialogOpen, setPushDialogOpen] = useState(false);
+  const [pushTableName, setPushTableName] = useState('');
+  const [pushIfExists, setPushIfExists] = useState('replace');
+  const [pushing, setPushing] = useState(false);
+  const [pushResult, setPushResult] = useState<PushToPostgresResult | null>(null);
+  const [pushHistory, setPushHistory] = useState<PostgresPushRecord[]>([]);
+  const [pushHistoryOpen, setPushHistoryOpen] = useState(false);
+
   // Version history
-  const [versionHistory, setVersionHistory] = useState<SilverTransformation[]>([]);
+  const [versionHistory, setVersionHistory] = useState<GoldTransformation[]>([]);
   const [versionsDialogOpen, setVersionsDialogOpen] = useState(false);
 
   // Execution history
-  const [executions, setExecutions] = useState<SilverExecution[]>([]);
+  const [executions, setExecutions] = useState<GoldExecution[]>([]);
   const [executionsOpen, setExecutionsOpen] = useState(false);
 
-  // Data preview (bronze & silver)
+  // Data preview (silver & gold)
   const [previewData, setPreviewData] = useState<DataPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewDialogOpen, setPreviewDialogOpen] = useState(false);
-  const [previewType, setPreviewType] = useState<'bronze' | 'silver'>('bronze');
+  const [previewType, setPreviewType] = useState<'silver' | 'gold'>('silver');
 
   // Bottom panel tabs
-  const [bottomTab, setBottomTab] = useState(0); // 0=dry-run, 1=schema
+  const [bottomTab, setBottomTab] = useState(0);
 
   // DnD sensors
   const sensors = useSensors(
@@ -191,15 +202,15 @@ export default function SilverEnrichmentPage() {
   // =========================================================================
   const loadTransformList = useCallback(async () => {
     if (!projectId) return;
-    try { setAllTransforms(await silverApi.list(projectId)); } catch {}
+    try { setAllTransforms(await goldApi.list(projectId)); } catch {}
   }, [projectId]);
 
   const loadCurrentTransform = useCallback(async () => {
     if (!projectId || !transformId) return;
     try {
       const [t, msgs] = await Promise.all([
-        silverApi.get(projectId, transformId),
-        silverApi.getMessages(projectId, transformId),
+        goldApi.get(projectId, transformId),
+        goldApi.getMessages(projectId, transformId),
       ]);
       setTransformation(t);
       setMessages(msgs);
@@ -229,7 +240,7 @@ export default function SilverEnrichmentPage() {
     setMessages(prev => [...prev, tempUserMsg]);
 
     try {
-      const result = await silverApi.chat(projectId, transformId, msg);
+      const result = await goldApi.chat(projectId, transformId, msg);
       const assistantMsg: ConversationMessage = {
         id: result.message_id, role: 'assistant', content: result.content,
         code_block: result.code || null, dry_run_result: null,
@@ -237,7 +248,7 @@ export default function SilverEnrichmentPage() {
       };
       setMessages(prev => [...prev.filter(m => !m.id.startsWith('temp-')), tempUserMsg, assistantMsg]);
       if (result.code) setCode(result.code);
-      setTransformation(await silverApi.get(projectId, transformId));
+      setTransformation(await goldApi.get(projectId, transformId));
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to send message');
       setMessages(prev => prev.filter(m => !m.id.startsWith('temp-')));
@@ -251,9 +262,9 @@ export default function SilverEnrichmentPage() {
     if (!projectId || !transformId || !code.trim()) return;
     setCodeSaving(true); setError(null);
     try {
-      await silverApi.updateCode(projectId, transformId, code);
+      await goldApi.updateCode(projectId, transformId, code);
       setEditingCode(false);
-      setTransformation(await silverApi.get(projectId, transformId));
+      setTransformation(await goldApi.get(projectId, transformId));
     } catch (err: any) { setError(err.response?.data?.detail || 'Failed to save code');
     } finally { setCodeSaving(false); }
   };
@@ -263,12 +274,12 @@ export default function SilverEnrichmentPage() {
     setDryRunning(true); setDryRunResult(null); setError(null); setBottomTab(0);
     try {
       if (editingCode && code.trim()) {
-        await silverApi.updateCode(projectId, transformId, code);
+        await goldApi.updateCode(projectId, transformId, code);
         setEditingCode(false);
       }
-      const result = await silverApi.dryRun(projectId, transformId);
+      const result = await goldApi.dryRun(projectId, transformId);
       setDryRunResult(result);
-      setTransformation(await silverApi.get(projectId, transformId));
+      setTransformation(await goldApi.get(projectId, transformId));
     } catch (err: any) { setError(err.response?.data?.detail || 'Dry-run failed');
     } finally { setDryRunning(false); }
   };
@@ -282,10 +293,10 @@ export default function SilverEnrichmentPage() {
     if (!projectId || !transformId || !code.trim() || !confirmName.trim()) return;
     setConfirming(true); setError(null);
     try {
-      const updated = await silverApi.confirm(projectId, transformId, confirmName.trim(), code);
+      const updated = await goldApi.confirm(projectId, transformId, confirmName.trim(), code);
       setTransformation(updated);
       setConfirmDialogOpen(false);
-      if (updated.id !== transformId) navigate(`/project/${projectId}/silver/${updated.id}`, { replace: true });
+      if (updated.id !== transformId) navigate(`/project/${projectId}/gold/${updated.id}`, { replace: true });
       await loadTransformList();
     } catch (err: any) { setError(err.response?.data?.detail || 'Failed to confirm transformation');
     } finally { setConfirming(false); }
@@ -298,9 +309,9 @@ export default function SilverEnrichmentPage() {
     if (!projectId || !transformId) return;
     setClearDialogOpen(false);
     try {
-      await silverApi.clearChat(projectId, transformId);
+      await goldApi.clearChat(projectId, transformId);
       setMessages([]); setCode(''); setDryRunResult(null);
-      setTransformation(await silverApi.get(projectId, transformId));
+      setTransformation(await goldApi.get(projectId, transformId));
     } catch (err: any) { setError(err.response?.data?.detail || 'Failed to clear chat'); }
   };
 
@@ -311,9 +322,9 @@ export default function SilverEnrichmentPage() {
     if (!projectId || !newTransformName.trim()) return;
     setCreatingTransform(true);
     try {
-      const t = await silverApi.create(projectId, { name: newTransformName.trim(), description: 'AI-driven transformation' });
+      const t = await goldApi.create(projectId, { name: newTransformName.trim(), description: 'AI-driven gold transformation' });
       setNewTransformDialogOpen(false); setNewTransformName('');
-      navigate(`/project/${projectId}/silver/${t.id}`);
+      navigate(`/project/${projectId}/gold/${t.id}`);
       await loadTransformList();
     } catch (err: any) { setError(err.response?.data?.detail || 'Failed to create transformation');
     } finally { setCreatingTransform(false); }
@@ -325,18 +336,18 @@ export default function SilverEnrichmentPage() {
   const handleDelete = async (tid: string) => {
     if (!projectId) return;
     try {
-      await silverApi.delete(projectId, tid);
+      await goldApi.delete(projectId, tid);
       await loadTransformList();
       if (tid === transformId) {
         const remaining = allTransforms.filter(t => t.id !== tid);
-        if (remaining.length > 0) navigate(`/project/${projectId}/silver/${remaining[0].id}`, { replace: true });
+        if (remaining.length > 0) navigate(`/project/${projectId}/gold/${remaining[0].id}`, { replace: true });
         else navigate(`/project/${projectId}`);
       }
     } catch (err: any) { setError(err.response?.data?.detail || 'Failed to delete'); }
   };
 
   // =========================================================================
-  // Upload to Silver
+  // Upload to Gold
   // =========================================================================
   const confirmedTransforms = allTransforms.filter(t => t.is_active && t.status === 'confirmed');
 
@@ -345,15 +356,43 @@ export default function SilverEnrichmentPage() {
     setUploadDialogOpen(true);
   };
 
-  const handleUploadToSilver = async () => {
+  const handleUploadToGold = async () => {
     if (!projectId || selectedForUpload.length === 0) return;
     setUploadDialogOpen(false);
     setUploading(true); setError(null); setUploadResult(null);
     try {
-      const result = await silverApi.uploadToSilver(projectId, selectedForUpload);
+      const result = await goldApi.uploadToGold(projectId, selectedForUpload);
       setUploadResult(result);
-    } catch (err: any) { setError(err.response?.data?.detail || 'Upload to Silver failed');
+    } catch (err: any) { setError(err.response?.data?.detail || 'Upload to Gold failed');
     } finally { setUploading(false); }
+  };
+
+  // =========================================================================
+  // Push to Postgres
+  // =========================================================================
+  const handleOpenPushDialog = () => {
+    setPushTableName('');
+    setPushIfExists('replace');
+    setPushDialogOpen(true);
+  };
+
+  const handlePushToPostgres = async () => {
+    if (!projectId || !pushTableName.trim()) return;
+    setPushDialogOpen(false);
+    setPushing(true); setError(null); setPushResult(null);
+    try {
+      const result = await goldApi.pushToPostgres(projectId, pushTableName.trim(), pushIfExists);
+      setPushResult(result);
+    } catch (err: any) { setError(err.response?.data?.detail || 'Push to Postgres failed');
+    } finally { setPushing(false); }
+  };
+
+  const handleLoadPushHistory = async () => {
+    if (!projectId) return;
+    try {
+      setPushHistory(await goldApi.listPostgresPushes(projectId));
+      setPushHistoryOpen(true);
+    } catch { setError('Failed to load push history'); }
   };
 
   // =========================================================================
@@ -362,7 +401,7 @@ export default function SilverEnrichmentPage() {
   const handleViewVersions = async () => {
     if (!projectId || !transformation) return;
     try {
-      setVersionHistory(await silverApi.getVersions(projectId, transformation.task_order));
+      setVersionHistory(await goldApi.getVersions(projectId, transformation.task_order));
       setVersionsDialogOpen(true);
     } catch { setError('Failed to load version history'); }
   };
@@ -370,10 +409,10 @@ export default function SilverEnrichmentPage() {
   const handleRollback = async (versionId: string) => {
     if (!projectId) return;
     try {
-      await silverApi.rollback(projectId, versionId);
+      await goldApi.rollback(projectId, versionId);
       setVersionsDialogOpen(false);
       await loadTransformList();
-      navigate(`/project/${projectId}/silver/${versionId}`, { replace: true });
+      navigate(`/project/${projectId}/gold/${versionId}`, { replace: true });
     } catch (err: any) { setError(err.response?.data?.detail || 'Rollback failed'); }
   };
 
@@ -383,7 +422,7 @@ export default function SilverEnrichmentPage() {
   const handleLoadExecutions = async () => {
     if (!projectId) return;
     try {
-      setExecutions(await silverApi.listExecutions(projectId));
+      setExecutions(await goldApi.listExecutions(projectId));
       setExecutionsOpen(true);
     } catch { setError('Failed to load execution history'); }
   };
@@ -391,13 +430,13 @@ export default function SilverEnrichmentPage() {
   // =========================================================================
   // Data preview
   // =========================================================================
-  const handlePreview = async (type: 'bronze' | 'silver') => {
+  const handlePreview = async (type: 'silver' | 'gold') => {
     if (!projectId) return;
     setPreviewType(type); setPreviewLoading(true); setPreviewData(null); setPreviewDialogOpen(true);
     try {
-      const data = type === 'bronze'
-        ? await bronzeApi.preview(projectId, 50)
-        : await silverApi.preview(projectId, 50);
+      const data = type === 'silver'
+        ? await silverApi.preview(projectId, 50)
+        : await goldApi.preview(projectId, 50);
       setPreviewData(data);
     } catch (err: any) { setError(err.response?.data?.detail || `Failed to load ${type} preview`); setPreviewDialogOpen(false);
     } finally { setPreviewLoading(false); }
@@ -421,7 +460,7 @@ export default function SilverEnrichmentPage() {
     });
 
     try {
-      await silverApi.reorder(projectId, reordered.map((t: SilverTransformation) => t.id));
+      await goldApi.reorder(projectId, reordered.map((t: GoldTransformation) => t.id));
       await loadTransformList();
     } catch { setError('Failed to save reorder'); }
   };
@@ -440,8 +479,8 @@ export default function SilverEnrichmentPage() {
         <Box sx={{ maxWidth: '85%', display: 'flex', gap: 1.5, flexDirection: isUser ? 'row-reverse' : 'row' }}>
           <Box sx={{
             width: 36, height: 36, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-            bgcolor: isUser ? 'primary.main' : 'rgba(192,192,192,0.15)',
-            color: isUser ? 'primary.contrastText' : '#c0c0c0', flexShrink: 0, mt: 0.5,
+            bgcolor: isUser ? 'primary.main' : 'rgba(255,215,0,0.15)',
+            color: isUser ? 'primary.contrastText' : '#ffd700', flexShrink: 0, mt: 0.5,
           }}>
             {isUser ? <PersonIcon sx={{ fontSize: 20 }} /> : <BotIcon sx={{ fontSize: 20 }} />}
           </Box>
@@ -489,8 +528,8 @@ export default function SilverEnrichmentPage() {
           <IconButton onClick={() => navigate(`/project/${projectId}`)}><BackIcon /></IconButton>
           <Box>
             <Box display="flex" alignItems="center" gap={1}>
-              <AIIcon sx={{ color: '#c0c0c0' }} />
-              <Typography variant="h5">Silver Transformations</Typography>
+              <AIIcon sx={{ color: '#ffd700' }} />
+              <Typography variant="h5">Gold Transformations</Typography>
             </Box>
             <Typography variant="body2" color="text.secondary">
               {confirmedCount} confirmed · {activeTransforms.length} total · Drag to reorder
@@ -498,35 +537,46 @@ export default function SilverEnrichmentPage() {
           </Box>
         </Box>
         <Box display="flex" gap={1} alignItems="center">
-          <Tooltip title="Preview Bronze data">
+          <Tooltip title="Preview Silver data (input)">
             <Button size="small" variant="outlined" startIcon={<PreviewIcon />}
-              onClick={() => handlePreview('bronze')} sx={{ textTransform: 'none' }}>Bronze</Button>
-          </Tooltip>
-          <Tooltip title="Preview Silver data">
-            <Button size="small" variant="outlined" color="secondary" startIcon={<PreviewIcon />}
               onClick={() => handlePreview('silver')} sx={{ textTransform: 'none' }}>Silver</Button>
+          </Tooltip>
+          <Tooltip title="Preview Gold data (output)">
+            <Button size="small" variant="outlined" color="warning" startIcon={<PreviewIcon />}
+              onClick={() => handlePreview('gold')} sx={{ textTransform: 'none' }}>Gold</Button>
           </Tooltip>
           <Tooltip title="Execution history">
             <Button size="small" variant="outlined" startIcon={<TimelineIcon />}
               onClick={handleLoadExecutions} sx={{ textTransform: 'none' }}>History</Button>
           </Tooltip>
+          <Tooltip title="Postgres push history">
+            <Button size="small" variant="outlined" color="info" startIcon={<PostgresIcon />}
+              onClick={handleLoadPushHistory} sx={{ textTransform: 'none' }}>Pushes</Button>
+          </Tooltip>
           {confirmedCount > 0 && (
-            <Button variant="contained" color="success"
-              startIcon={uploading ? <CircularProgress size={16} color="inherit" /> : <UploadIcon />}
-              onClick={handleOpenUploadDialog} disabled={uploading}>
-              {uploading ? 'Processing…' : 'Upload to Silver'}
-            </Button>
+            <>
+              <Button variant="contained" sx={{ bgcolor: '#b8860b', '&:hover': { bgcolor: '#996f0a' } }}
+                startIcon={uploading ? <CircularProgress size={16} color="inherit" /> : <UploadIcon />}
+                onClick={handleOpenUploadDialog} disabled={uploading}>
+                {uploading ? 'Processing…' : 'Upload to Gold'}
+              </Button>
+              <Button variant="contained" color="info"
+                startIcon={pushing ? <CircularProgress size={16} color="inherit" /> : <PostgresIcon />}
+                onClick={handleOpenPushDialog} disabled={pushing}>
+                {pushing ? 'Pushing…' : 'Push to Postgres'}
+              </Button>
+            </>
           )}
         </Box>
       </Box>
 
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
 
-      {/* Upload result banner with per-transform error details */}
+      {/* Upload result banner */}
       {uploadResult && (
         <Alert severity={uploadResult.success ? 'success' : 'error'} sx={{ mb: 2 }} onClose={() => setUploadResult(null)}>
           {uploadResult.success
-            ? `✅ Uploaded to Silver! ${uploadResult.input_records} → ${uploadResult.output_records} records (${uploadResult.transformations_applied} transforms, ${uploadResult.duration_seconds}s)`
+            ? `✅ Uploaded to Gold! ${uploadResult.input_records} → ${uploadResult.output_records} records (${uploadResult.transformations_applied} transforms, ${uploadResult.duration_seconds}s)`
             : `❌ Upload failed: ${uploadResult.error}`}
           {uploadResult.transform_results && uploadResult.transform_results.length > 0 && (
             <Box sx={{ mt: 1, display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
@@ -539,12 +589,21 @@ export default function SilverEnrichmentPage() {
         </Alert>
       )}
 
+      {/* Push to Postgres result banner */}
+      {pushResult && (
+        <Alert severity={pushResult.success ? 'success' : 'error'} sx={{ mb: 2 }} onClose={() => setPushResult(null)}>
+          {pushResult.success
+            ? `✅ Pushed ${pushResult.records_pushed} records to Postgres table "${pushResult.table_name}" (${pushResult.duration_seconds}s)`
+            : `❌ Push failed: ${pushResult.error}`}
+        </Alert>
+      )}
+
       {/* Execution history collapsible */}
       <Collapse in={executionsOpen}>
         <Paper variant="outlined" sx={{ mb: 2, maxHeight: 200, overflow: 'auto' }}>
           <Box sx={{ p: 1.5, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
             position: 'sticky', top: 0, bgcolor: 'background.paper', zIndex: 1 }}>
-            <Typography variant="subtitle2"><TimelineIcon sx={{ fontSize: 16, mr: 0.5, verticalAlign: 'text-bottom' }} />Execution History</Typography>
+            <Typography variant="subtitle2"><TimelineIcon sx={{ fontSize: 16, mr: 0.5, verticalAlign: 'text-bottom' }} />Gold Execution History</Typography>
             <IconButton size="small" onClick={() => setExecutionsOpen(false)}><CollapseIcon sx={{ fontSize: 18 }} /></IconButton>
           </Box>
           {executions.length === 0 ? (
@@ -576,13 +635,50 @@ export default function SilverEnrichmentPage() {
         </Paper>
       </Collapse>
 
+      {/* Postgres push history collapsible */}
+      <Collapse in={pushHistoryOpen}>
+        <Paper variant="outlined" sx={{ mb: 2, maxHeight: 200, overflow: 'auto' }}>
+          <Box sx={{ p: 1.5, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            position: 'sticky', top: 0, bgcolor: 'background.paper', zIndex: 1 }}>
+            <Typography variant="subtitle2"><PostgresIcon sx={{ fontSize: 16, mr: 0.5, verticalAlign: 'text-bottom' }} />Postgres Push History</Typography>
+            <IconButton size="small" onClick={() => setPushHistoryOpen(false)}><CollapseIcon sx={{ fontSize: 18 }} /></IconButton>
+          </Box>
+          {pushHistory.length === 0 ? (
+            <Box p={2}><Typography variant="body2" color="text.secondary">No pushes yet.</Typography></Box>
+          ) : (
+            <Table size="small">
+              <TableHead><TableRow>
+                <TableCell sx={{ fontWeight: 700, fontSize: '0.75rem' }}>Status</TableCell>
+                <TableCell sx={{ fontWeight: 700, fontSize: '0.75rem' }}>Table</TableCell>
+                <TableCell sx={{ fontWeight: 700, fontSize: '0.75rem' }}>Records</TableCell>
+                <TableCell sx={{ fontWeight: 700, fontSize: '0.75rem' }}>Duration</TableCell>
+                <TableCell sx={{ fontWeight: 700, fontSize: '0.75rem' }}>Date</TableCell>
+                <TableCell sx={{ fontWeight: 700, fontSize: '0.75rem' }}>Error</TableCell>
+              </TableRow></TableHead>
+              <TableBody>{pushHistory.map(p => (
+                <TableRow key={p.id} hover>
+                  <TableCell><Chip label={p.status} size="small" color={p.status === 'completed' ? 'success' : p.status === 'failed' ? 'error' : 'info'}
+                    sx={{ height: 20, fontSize: '0.7rem' }} /></TableCell>
+                  <TableCell sx={{ fontSize: '0.8rem', fontFamily: 'monospace' }}>{p.table_name}</TableCell>
+                  <TableCell sx={{ fontSize: '0.8rem' }}>{p.records_pushed}</TableCell>
+                  <TableCell sx={{ fontSize: '0.8rem' }}>{p.duration_seconds?.toFixed(1)}s</TableCell>
+                  <TableCell sx={{ fontSize: '0.75rem' }}>{p.created_at ? new Date(p.created_at).toLocaleString() : '—'}</TableCell>
+                  <TableCell sx={{ fontSize: '0.75rem', color: 'error.main', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {p.error || '—'}</TableCell>
+                </TableRow>
+              ))}</TableBody>
+            </Table>
+          )}
+        </Paper>
+      </Collapse>
+
       {/* Main 3-column layout */}
       <Box sx={{ display: 'flex', gap: 2, flex: 1, minHeight: 0 }}>
 
-        {/* LEFT SIDEBAR: Drag-and-drop transformations list */}
+        {/* LEFT SIDEBAR */}
         <Paper variant="outlined" sx={{ width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <Box sx={{ p: 1.5, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Typography variant="subtitle2" sx={{ fontSize: '0.8rem' }}>Transformations</Typography>
+            <Typography variant="subtitle2" sx={{ fontSize: '0.8rem' }}>Gold Transforms</Typography>
             <Tooltip title="Add new transformation">
               <IconButton size="small" onClick={() => setNewTransformDialogOpen(true)}><AddIcon sx={{ fontSize: 18 }} /></IconButton>
             </Tooltip>
@@ -603,7 +699,7 @@ export default function SilverEnrichmentPage() {
         <Paper variant="outlined" sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <Box sx={{ p: 1.5, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <Box display="flex" alignItems="center" gap={1}>
-              <BotIcon sx={{ color: '#c0c0c0', fontSize: 20 }} />
+              <BotIcon sx={{ color: '#ffd700', fontSize: 20 }} />
               <Typography variant="subtitle2">{transformation.name}</Typography>
               <Chip label={`v${transformation.version}`} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
               <Chip label={STATUS_LABELS[transformation.status] || transformation.status}
@@ -620,14 +716,16 @@ export default function SilverEnrichmentPage() {
           <Box sx={{ flex: 1, overflowY: 'auto', p: 2, display: 'flex', flexDirection: 'column' }}>
             {messages.length === 0 && (
               <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'text.secondary', textAlign: 'center', gap: 2 }}>
-                <AIIcon sx={{ fontSize: 48, opacity: 0.3 }} />
-                <Typography variant="body1" fontWeight={600}>Describe your transformation</Typography>
+                <AIIcon sx={{ fontSize: 48, opacity: 0.3, color: '#ffd700' }} />
+                <Typography variant="body1" fontWeight={600}>Describe your Gold transformation</Typography>
                 <Typography variant="body2" sx={{ maxWidth: 400 }}>
-                  Tell the AI what you want to do with your data. It will generate PySpark code.
+                  Tell the AI what analytics-ready transformation you want. It generates PySpark code that runs on your Silver data.
                 </Typography>
                 <Box sx={{ mt: 1 }}>
-                  {['Filter rows where status is active', 'Join with routing table for origin/destination',
-                    'Normalize all string columns to lowercase', 'Add a computed column',
+                  {['Aggregate flights by airline and count total',
+                    'Calculate average delay per route',
+                    'Group by origin city and compute statistics',
+                    'Create a daily summary with counts and averages',
                   ].map((s, i) => (
                     <Chip key={i} label={s} size="small" variant="outlined"
                       sx={{ m: 0.5, cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' } }}
@@ -640,7 +738,7 @@ export default function SilverEnrichmentPage() {
             {chatSending && (
               <Box display="flex" gap={1.5} mb={2}>
                 <Box sx={{ width: 36, height: 36, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  bgcolor: 'rgba(192,192,192,0.15)', color: '#c0c0c0', flexShrink: 0 }}>
+                  bgcolor: 'rgba(255,215,0,0.15)', color: '#ffd700', flexShrink: 0 }}>
                   <BotIcon sx={{ fontSize: 20 }} />
                 </Box>
                 <Paper variant="outlined" sx={{ p: 2, bgcolor: 'rgba(255,255,255,0.03)' }}>
@@ -655,7 +753,7 @@ export default function SilverEnrichmentPage() {
 
           <Box sx={{ p: 1.5, borderTop: '1px solid', borderColor: 'divider', display: 'flex', gap: 1 }}>
             <TextField fullWidth size="small" multiline maxRows={4}
-              placeholder={messages.length === 0 ? 'Describe what transformation you want…' : 'Follow up or refine…'}
+              placeholder={messages.length === 0 ? 'Describe what Gold transformation you want…' : 'Follow up or refine…'}
               value={chatInput} onChange={e => setChatInput(e.target.value)}
               onKeyDown={handleKeyDown} disabled={chatSending}
               sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: 'rgba(255,255,255,0.03)' } }} />
@@ -672,7 +770,7 @@ export default function SilverEnrichmentPage() {
           <Paper variant="outlined" sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 200 }}>
             <Box sx={{ p: 1.5, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <Box display="flex" alignItems="center" gap={1}>
-                <CodeIcon sx={{ color: '#90caf9', fontSize: 20 }} />
+                <CodeIcon sx={{ color: '#ffd700', fontSize: 20 }} />
                 <Typography variant="subtitle2">PySpark Code</Typography>
               </Box>
               <Box display="flex" gap={0.5}>
@@ -732,7 +830,7 @@ export default function SilverEnrichmentPage() {
                   onClick={handleDryRun} disabled={dryRunning}>
                   {dryRunning ? 'Running…' : 'Dry-Run'}
                 </Button>
-                <Button variant="contained" size="small" color="success"
+                <Button variant="contained" size="small" sx={{ bgcolor: '#b8860b', '&:hover': { bgcolor: '#996f0a' } }}
                   startIcon={confirming ? <CircularProgress size={16} /> : <ConfirmIcon />}
                   onClick={handleConfirmOpen} disabled={confirming}>
                   {isConfirmed ? `Confirmed v${transformation.version}` : 'Confirm & Save'}
@@ -793,7 +891,7 @@ export default function SilverEnrichmentPage() {
               <Box sx={{ px: 1.5, py: 1 }}>
                 {transformation.input_schema.map((field: any, i: number) => (
                   <Box key={i} display="flex" alignItems="center" gap={1} py={0.3}>
-                    <Typography variant="caption" sx={{ fontFamily: 'monospace', fontWeight: 600, color: '#90caf9', minWidth: 120 }}>{field.name}</Typography>
+                    <Typography variant="caption" sx={{ fontFamily: 'monospace', fontWeight: 600, color: '#ffd700', minWidth: 120 }}>{field.name}</Typography>
                     <Chip label={field.detected_type || field.type || 'string'} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
                     {field.nullable && <Typography variant="caption" color="text.secondary">nullable</Typography>}
                   </Box>
@@ -801,7 +899,7 @@ export default function SilverEnrichmentPage() {
               </Box>
             )}
             {bottomTab === 1 && transformation.input_schema.length === 0 && (
-              <Box p={2}><Typography variant="body2" color="text.secondary">No schema available.</Typography></Box>
+              <Box p={2}><Typography variant="body2" color="text.secondary">No schema available. Upload to Silver first.</Typography></Box>
             )}
           </Paper>
         </Box>
@@ -811,18 +909,18 @@ export default function SilverEnrichmentPage() {
 
       {/* Confirm dialog */}
       <Dialog open={confirmDialogOpen} onClose={() => setConfirmDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>{isConfirmed ? 'Save New Version' : 'Confirm Transformation'}</DialogTitle>
+        <DialogTitle>{isConfirmed ? 'Save New Version' : 'Confirm Gold Transformation'}</DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             {isConfirmed ? `This will create version ${transformation.version + 1}. The previous version will be archived.` : 'Give this transformation a name and confirm the code.'}
           </Typography>
           <TextField fullWidth autoFocus label="Transformation Name" value={confirmName}
-            onChange={e => setConfirmName(e.target.value)} placeholder="e.g., Filter Ground Flights" sx={{ mb: 1 }} />
+            onChange={e => setConfirmName(e.target.value)} placeholder="e.g., Aggregate by Route" sx={{ mb: 1 }} />
           {isConfirmed && <Chip label={`Current: v${transformation.version} → New: v${transformation.version + 1}`} size="small" color="info" variant="outlined" />}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setConfirmDialogOpen(false)}>Cancel</Button>
-          <Button onClick={handleConfirm} variant="contained" color="success" disabled={confirming || !confirmName.trim()}>
+          <Button onClick={handleConfirm} variant="contained" sx={{ bgcolor: '#b8860b', '&:hover': { bgcolor: '#996f0a' } }} disabled={confirming || !confirmName.trim()}>
             {confirming ? <CircularProgress size={18} /> : isConfirmed ? 'Save as New Version' : 'Confirm & Save'}
           </Button>
         </DialogActions>
@@ -840,11 +938,11 @@ export default function SilverEnrichmentPage() {
 
       {/* New transformation dialog */}
       <Dialog open={newTransformDialogOpen} onClose={() => setNewTransformDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>New Transformation</DialogTitle>
+        <DialogTitle>New Gold Transformation</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Add another transformation step. Transformations are applied in order during Upload to Silver.</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Add another Gold transformation step. Transformations run on Silver data in order.</Typography>
           <TextField fullWidth autoFocus label="Transformation Name" value={newTransformName}
-            onChange={e => setNewTransformName(e.target.value)} placeholder="e.g., Normalize Coordinates, Add City Names" />
+            onChange={e => setNewTransformName(e.target.value)} placeholder="e.g., Flight Delay Summary, Route Statistics" />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setNewTransformDialogOpen(false)}>Cancel</Button>
@@ -854,11 +952,11 @@ export default function SilverEnrichmentPage() {
         </DialogActions>
       </Dialog>
 
-      {/* Upload to Silver selection dialog */}
+      {/* Upload to Gold selection dialog */}
       <Dialog open={uploadDialogOpen} onClose={() => setUploadDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Upload to Silver</DialogTitle>
+        <DialogTitle>Upload to Gold</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Select the transformations to apply.</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Select the Gold transformations to apply to Silver data.</Typography>
           <FormControlLabel
             control={<Checkbox checked={selectedForUpload.length === confirmedTransforms.length && confirmedTransforms.length > 0}
               indeterminate={selectedForUpload.length > 0 && selectedForUpload.length < confirmedTransforms.length}
@@ -881,9 +979,42 @@ export default function SilverEnrichmentPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setUploadDialogOpen(false)}>Cancel</Button>
-          <Button onClick={handleUploadToSilver} variant="contained" color="success"
+          <Button onClick={handleUploadToGold} variant="contained" sx={{ bgcolor: '#b8860b', '&:hover': { bgcolor: '#996f0a' } }}
             disabled={selectedForUpload.length === 0} startIcon={<UploadIcon />}>
             Upload {selectedForUpload.length} Transform{selectedForUpload.length !== 1 ? 's' : ''}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Push to Postgres dialog */}
+      <Dialog open={pushDialogOpen} onClose={() => setPushDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          <Box display="flex" alignItems="center" gap={1}>
+            <PostgresIcon color="info" />
+            Push Gold Data to PostgreSQL
+          </Box>
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Load the latest Gold data into a PostgreSQL table. This makes it available for Metabase dashboards and SQL queries.
+          </Typography>
+          <TextField fullWidth autoFocus label="Table Name" value={pushTableName}
+            onChange={e => setPushTableName(e.target.value)} placeholder="e.g., gold_flight_summary"
+            helperText="The table will be created in the pipeline database" sx={{ mb: 2 }} />
+          <FormControl fullWidth size="small">
+            <InputLabel>If Table Exists</InputLabel>
+            <Select value={pushIfExists} onChange={e => setPushIfExists(e.target.value)} label="If Table Exists">
+              <MenuItem value="replace">Replace (drop & recreate)</MenuItem>
+              <MenuItem value="append">Append (add rows)</MenuItem>
+              <MenuItem value="fail">Fail (error if exists)</MenuItem>
+            </Select>
+          </FormControl>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPushDialogOpen(false)}>Cancel</Button>
+          <Button onClick={handlePushToPostgres} variant="contained" color="info"
+            disabled={!pushTableName.trim()} startIcon={<PostgresIcon />}>
+            Push to Postgres
           </Button>
         </DialogActions>
       </Dialog>
@@ -903,7 +1034,7 @@ export default function SilverEnrichmentPage() {
                   </Tooltip>
                 ) : null
               }>
-                <ListItemButton onClick={() => { setVersionsDialogOpen(false); navigate(`/project/${projectId}/silver/${v.id}`); }}>
+                <ListItemButton onClick={() => { setVersionsDialogOpen(false); navigate(`/project/${projectId}/gold/${v.id}`); }}>
                   <ListItemText primary={`v${v.version} — ${v.name}`}
                     secondary={`${STATUS_LABELS[v.status] || v.status} · ${new Date(v.created_at).toLocaleString()}`}
                     primaryTypographyProps={{ fontWeight: v.is_active ? 700 : 400 }} />
@@ -924,8 +1055,8 @@ export default function SilverEnrichmentPage() {
         PaperProps={{ sx: { bgcolor: 'background.paper', maxHeight: '80vh' } }}>
         <DialogTitle>
           <Box display="flex" alignItems="center" gap={1}>
-            <PreviewIcon color={previewType === 'bronze' ? 'warning' : 'secondary'} />
-            <Typography variant="h6">{previewType === 'bronze' ? 'Bronze' : 'Silver'} Data Preview</Typography>
+            <PreviewIcon color={previewType === 'silver' ? 'secondary' : 'warning'} />
+            <Typography variant="h6">{previewType === 'silver' ? 'Silver' : 'Gold'} Data Preview</Typography>
             {previewData && <Chip label={`${previewData.total_records.toLocaleString()} total records`} size="small" variant="outlined" />}
           </Box>
         </DialogTitle>
@@ -961,8 +1092,6 @@ export default function SilverEnrichmentPage() {
           {previewData && (
             <Typography variant="caption" color="text.secondary" sx={{ mr: 'auto', ml: 1 }}>
               Showing {previewData.preview_count} of {previewData.total_records.toLocaleString()} rows
-              {previewData.bronze_path && ` · ${previewData.bronze_path}`}
-              {previewData.silver_path && ` · ${previewData.silver_path}`}
             </Typography>
           )}
           <Button onClick={() => setPreviewDialogOpen(false)}>Close</Button>
