@@ -25,6 +25,7 @@
 
 - [Overview](#overview)
 - [Architecture Diagram](#architecture-diagram)
+- [Demo Video](#demo-video)
 - [Tech Stack](#tech-stack)
 - [Features](#features)
 - [Project Structure](#project-structure)
@@ -46,6 +47,14 @@ Users interact through a **React-based dark-themed UI** to upload data files, au
 
 ## Architecture Diagram
 ![Architecture Diagram](pic/design.png)
+
+---
+
+## Demo Video
+
+<video src="screenshots/automation.mp4" controls></video>
+
+[Download demo video](screenshots/automation.mp4)
 
 
 ### Data Flow
