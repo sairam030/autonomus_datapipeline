@@ -52,7 +52,10 @@ Users interact through a **React-based dark-themed UI** to upload data files, au
 
 ## Demo Video
 
-<video src="screenshots/automation.mp4" controls></video>
+<video controls width="100%" poster="screenshots/1_project_home.png">
+      <source src="screenshots/automation.mp4" type="video/mp4" />
+      Your browser does not support the video tag.
+</video>
 
 [Download demo video](screenshots/automation.mp4)
 
