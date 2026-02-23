@@ -50,14 +50,27 @@ Users interact through a **React-based dark-themed UI** to upload data files, au
 
 ---
 
-## Demo Video
+## 🎬 Demo & Screenshots
 
-<video controls width="100%" poster="screenshots/1_project_home.png">
-      <source src="screenshots/automation.mp4" type="video/mp4" />
-      Your browser does not support the video tag.
-</video>
+📹 **[Watch Demo Video](screenshots/automation.mp4)** — Full walkthrough of the pipeline (upload → Bronze → Silver → Gold → PostgreSQL)
 
-[Download demo video](screenshots/automation.mp4)
+📸 **[View All Screenshots](screenshots/)** — UI screenshots covering all major steps:
+
+| # | Screenshot |
+|---|---|
+| 1 | [Project Home](screenshots/1_project_home.png) |
+| 2 | [Add Local File](screenshots/2_local_add.png) |
+| 3 | [CSV Schema Detection](screenshots/3_csv_schema_detection.png) |
+| 4 | [CSV to Bronze](screenshots/4_csv_to_bronze.png) |
+| 5 | [Silver Transformation](screenshots/5_silver_tranformation.png) |
+| 6 | [Silver Dry Run](screenshots/6_silver_dry_run.png) |
+| 7 | [Data Preview](screenshots/7_data_preview.png) |
+| 8 | [Upload to Silver](screenshots/8_upload_to_silver.png) |
+| 9 | [Gold Transformation](screenshots/9_gold_tranformation.png) |
+| 10 | [Master DAG](screenshots/10_master_dag.png) |
+| 11 | [Airflow Graph](screenshots/11_airflow_graph.png) |
+| 12 | [Kafka Demo](screenshots/12_kafka_demo.png) |
+| 13 | [Kafka Schema](screenshots/13_kafka_shema.png) |
 
 
 ### Data Flow
