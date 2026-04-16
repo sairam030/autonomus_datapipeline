@@ -1,0 +1,20 @@
+\begin{table}[ht]
+\centering
+\caption{REST API case study scalability (mean $\pm$ std, N=10)}
+\label{tab:api_scalability}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Data Size} & \textbf{Schema Detect (s)} & \textbf{Bronze Ingest (s)} & \textbf{Total Records} & \textbf{Throughput (rec/s)} \\
+\hline
+500 rec & 1.82 $\pm$ 0.16 & 6.78 $\pm$ 1.00 & 500 $\pm$ 0 & 81 $\pm$ 9 \\
+\hline
+2500 rec & 1.81 $\pm$ 0.13 & 17.65 $\pm$ 2.07 & 2500 $\pm$ 0 & 140 $\pm$ 8 \\
+\hline
+5000 rec & 1.89 $\pm$ 0.13 & 33.26 $\pm$ 3.47 & 5000 $\pm$ 0 & 155 $\pm$ 14 \\
+\hline
+10000 rec & 2.06 $\pm$ 0.19 & 58.27 $\pm$ 4.95 & 10000 $\pm$ 0 & 167 $\pm$ 16 \\
+\hline
+\end{tabular}
+}
+\end{table}

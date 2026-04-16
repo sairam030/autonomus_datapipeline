@@ -10,7 +10,9 @@ from functools import lru_cache
 class Settings(BaseSettings):
     # Application
     app_name: str = "Autonomous Pipeline"
-    debug: bool = True
+    debug: bool = False
+    log_level: str = "INFO"
+    cors_origins: str = "http://localhost:3001,http://localhost:3000,http://127.0.0.1:3001,http://127.0.0.1:3000"
 
     # PostgreSQL
     database_url: str = "postgresql+psycopg2://pipeline:pipeline123@localhost:5433/autonomous_pipeline"
@@ -43,6 +45,10 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+
+    def cors_origins_list(self) -> list[str]:
+        """Return normalized CORS origins from a comma-separated env value."""
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 @lru_cache()

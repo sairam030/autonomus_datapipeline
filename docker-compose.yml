@@ -8,7 +8,7 @@
 # =============================================================================
 x-airflow-common: &airflow-common
   build: .
-  image: autonomous-pipeline:latest
+  image: ${PIPELINE_IMAGE:-autonomous-pipeline:latest}
   environment: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://pipeline:pipeline123@postgres/autonomous_pipeline
@@ -149,7 +149,7 @@ services:
     networks:
       - pipeline-net
     healthcheck:
-      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
+      test: ["CMD-SHELL", "echo srvr | nc localhost 2181 | grep -q '^Mode:'"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -179,7 +179,7 @@ services:
     networks:
       - pipeline-net
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -209,7 +209,7 @@ services:
   # ===========================================================================
   spark-master:
     build: .
-    image: sairam030/custom-airflow-spark:2.9.0
+    image: ${SPARK_IMAGE:-sairam030/custom-airflow-spark:2.9.0}
     container_name: ap-spark-master
     hostname: spark-master
     user: root
@@ -243,7 +243,7 @@ services:
 
   spark-worker-1:
     build: .
-    image: sairam030/custom-airflow-spark:2.9.0
+    image: ${SPARK_IMAGE:-sairam030/custom-airflow-spark:2.9.0}
     container_name: ap-spark-worker-1
     hostname: spark-worker-1
     user: root
@@ -278,12 +278,12 @@ services:
   # ===========================================================================
   backend:
     build: .
-    image: autonomous-pipeline:latest
+    image: ${PIPELINE_IMAGE:-autonomous-pipeline:latest}
     container_name: ap-backend
     command: >
       bash -c "
       cd /opt/pipeline &&
-      python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+      python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
       "
     environment:
       SPARK_HOME: /opt/spark
@@ -321,6 +321,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     networks:
       - pipeline-net
     restart: unless-stopped

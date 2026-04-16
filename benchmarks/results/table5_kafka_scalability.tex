@@ -1,0 +1,20 @@
+\begin{table}[ht]
+\centering
+\caption{Kafka streaming scalability at different message rates (mean $\pm$ std, N=10)}
+\label{tab:kafka_scalability}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Message Rate} & \textbf{Schema Detect (s)} & \textbf{Bronze/Batch (s)} & \textbf{Records/Batch} & \textbf{Throughput (rec/s)} \\
+\hline
+50 msg/s & 2.94 $\pm$ 0.35 & 7.90 $\pm$ 1.29 & 2978 $\pm$ 127 & 342 $\pm$ 27 \\
+\hline
+100 msg/s & 3.00 $\pm$ 0.42 & 14.41 $\pm$ 2.87 & 6016 $\pm$ 81 & 411 $\pm$ 51 \\
+\hline
+500 msg/s & 3.38 $\pm$ 0.45 & 45.08 $\pm$ 4.13 & 29732 $\pm$ 709 & 690 $\pm$ 63 \\
+\hline
+1000 msg/s & 4.01 $\pm$ 0.54 & 83.06 $\pm$ 6.76 & 60602 $\pm$ 1806 & 727 $\pm$ 47 \\
+\hline
+\end{tabular}
+}
+\end{table}

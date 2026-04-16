@@ -331,6 +331,55 @@ To also remove persistent volumes (database, MinIO data, etc.):
 docker compose down -v
 ```
 
+### 7. Run Basic Smoke Tests
+
+Backend health endpoint tests:
+
+```bash
+docker compose run --rm --entrypoint /bin/sh backend -lc "cd /opt/pipeline && python -m unittest discover -s backend/tests -p 'test_*.py'"
+```
+
+Frontend tests (CI mode):
+
+```bash
+docker compose run --rm frontend npm run test:ci
+```
+
+Frontend production build:
+
+```bash
+docker compose run --rm frontend npm run build
+```
+
+### 8. Build and Push Images to Your Docker Registry
+
+If you want to avoid local rebuilds in the future and run from your own registry:
+
+```bash
+# Login once
+docker login
+
+# Build + push project images
+./scripts/docker_build_and_push.sh <dockerhub_user> <tag>
+```
+
+This pushes:
+- `<dockerhub_user>/autonomous-pipeline:<tag>`
+- `<dockerhub_user>/autonomous-spark:<tag>`
+
+Then create `.env.images` in project root:
+
+```bash
+PIPELINE_IMAGE=<dockerhub_user>/autonomous-pipeline:<tag>
+SPARK_IMAGE=<dockerhub_user>/autonomous-spark:<tag>
+```
+
+Pull and run without building:
+
+```bash
+./scripts/docker_pull_and_up.sh
+```
+
 ---
 
 ## Service Ports

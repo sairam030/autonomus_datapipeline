@@ -1,0 +1,42 @@
+\begin{table}[ht]
+\centering
+\caption{Feature Comparison of Data Pipeline Tools}
+\label{tab:feature_comparison}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|l|c|c|c|c|c|}
+\hline
+\textbf{Feature} & \textbf{Our Model} & \textbf{Apache Airflow} & \textbf{Prefect} & \textbf{Dagster} & \textbf{Apache NiFi} \\
+\hline
+AI-Powered Code Generation & \checkmark & $\times$ & $\times$ & $\times$ & $\times$ \\
+\hline
+Auto Schema Detection & \checkmark & $\times$ & $\times$ & $\times$ & $\circ$ \\
+\hline
+Medallion Architecture (Bronze/Silver/Gold) & \checkmark (built-in) & $\times$ & $\times$ & $\circ$ (assets) & $\times$ \\
+\hline
+Auto DAG Generation & \checkmark & $\times$ & $\times$ & $\times$ & $\times$ \\
+\hline
+Visual UI for Pipeline Config & \checkmark & $\circ$ (monitoring only) & \checkmark & \checkmark & \checkmark \\
+\hline
+Multi-Source Support (CSV/JSON/Parquet) & \checkmark & $\circ$ (via operators) & $\circ$ (via tasks) & $\circ$ (via IO managers) & \checkmark \\
+\hline
+REST API Ingestion & \checkmark & $\circ$ (HttpOperator) & $\circ$ (custom) & $\circ$ (custom) & \checkmark \\
+\hline
+Kafka Streaming & \checkmark & $\circ$ (KafkaOperator) & $\times$ & $\times$ & \checkmark \\
+\hline
+Natural Language Transformations & \checkmark (Gemini AI) & $\times$ & $\times$ & $\times$ & $\times$ \\
+\hline
+Dry-Run / Preview & \checkmark & $\times$ & $\times$ & $\circ$ & $\times$ \\
+\hline
+Transformation Versioning & \checkmark & $\times$ & $\times$ & $\times$ & $\times$ \\
+\hline
+Push to Data Warehouse & \checkmark (PostgreSQL) & $\circ$ (manual) & $\circ$ (manual) & $\circ$ (IO managers) & $\circ$ (processors) \\
+\hline
+Configuration-Driven (No-Code Setup) & \checkmark & $\times$ & $\times$ & $\times$ & $\circ$ (XML/UI) \\
+\hline
+Distributed Processing (Spark) & \checkmark & $\circ$ (SparkSubmitOperator) & $\times$ & $\times$ & $\times$ \\
+\hline
+Containerized Deployment & \checkmark (Docker Compose) & \checkmark & \checkmark & \checkmark & \checkmark \\
+\hline
+\end{tabular}
+}
+\end{table}
