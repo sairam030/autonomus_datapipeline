@@ -7,7 +7,12 @@
 # SHARED CONFIGURATION (same pattern as aviation)
 # =============================================================================
 x-airflow-common: &airflow-common
-  build: .
+  build:
+    context: .
+    args:
+      SPARK_VERSION: ${SPARK_VERSION:-3.5.1}
+      HADOOP_VERSION: ${HADOOP_VERSION:-3}
+      PY4J_VERSION: ${PY4J_VERSION:-0.10.9.7}
   image: ${PIPELINE_IMAGE:-autonomous-pipeline:latest}
   environment: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -208,7 +213,12 @@ services:
   # SPARK CLUSTER (same pattern as aviation project)
   # ===========================================================================
   spark-master:
-    build: .
+    build:
+      context: .
+      args:
+        SPARK_VERSION: ${SPARK_VERSION:-3.5.1}
+        HADOOP_VERSION: ${HADOOP_VERSION:-3}
+        PY4J_VERSION: ${PY4J_VERSION:-0.10.9.7}
     image: ${SPARK_IMAGE:-sairam030/custom-airflow-spark:2.9.0}
     container_name: ap-spark-master
     hostname: spark-master
@@ -242,7 +252,12 @@ services:
     restart: unless-stopped
 
   spark-worker-1:
-    build: .
+    build:
+      context: .
+      args:
+        SPARK_VERSION: ${SPARK_VERSION:-3.5.1}
+        HADOOP_VERSION: ${HADOOP_VERSION:-3}
+        PY4J_VERSION: ${PY4J_VERSION:-0.10.9.7}
     image: ${SPARK_IMAGE:-sairam030/custom-airflow-spark:2.9.0}
     container_name: ap-spark-worker-1
     hostname: spark-worker-1
@@ -277,7 +292,12 @@ services:
   # BACKEND API (FastAPI)
   # ===========================================================================
   backend:
-    build: .
+    build:
+      context: .
+      args:
+        SPARK_VERSION: ${SPARK_VERSION:-3.5.1}
+        HADOOP_VERSION: ${HADOOP_VERSION:-3}
+        PY4J_VERSION: ${PY4J_VERSION:-0.10.9.7}
     image: ${PIPELINE_IMAGE:-autonomous-pipeline:latest}
     container_name: ap-backend
     command: >

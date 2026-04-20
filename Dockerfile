@@ -17,13 +17,19 @@ ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # Download and install Spark
-ENV SPARK_VERSION=3.5.1
-ENV HADOOP_VERSION=3
+ARG SPARK_VERSION=3.5.1
+ARG HADOOP_VERSION=3
+ARG PY4J_VERSION=0.10.9.7
+
+ENV SPARK_VERSION=${SPARK_VERSION}
+ENV HADOOP_VERSION=${HADOOP_VERSION}
+ENV PY4J_VERSION=${PY4J_VERSION}
 ENV SPARK_HOME=/opt/spark
 ENV PATH="${SPARK_HOME}/bin:${SPARK_HOME}/sbin:${PATH}"
-ENV PYTHONPATH="${SPARK_HOME}/python:${SPARK_HOME}/python/lib/py4j-0.10.9.7-src.zip:${PYTHONPATH}"
+ENV PYTHONPATH="${SPARK_HOME}/python:${SPARK_HOME}/python/lib/py4j-${PY4J_VERSION}-src.zip:${PYTHONPATH}"
 
-RUN curl -fsSL "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz" \
+RUN echo "Using SPARK_VERSION=${SPARK_VERSION}, HADOOP_VERSION=${HADOOP_VERSION}" && \
+    curl -fsSL "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz" \
     | tar -xz -C /opt/ && \
     mv /opt/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION} ${SPARK_HOME} && \
     chmod -R 755 ${SPARK_HOME}
